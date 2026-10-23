@@ -1,6 +1,6 @@
 --[[==========================================================================
-  AUTO ATM HUB — FULL FIXED VERSION v3
-  (UNDERGROUND PRIMARY + HACK UNDER ATM + PULL OWN VEHICLE)
+  AUTO ATM HUB — FULL FIXED VERSION v4
+  (UNDERGROUND PRIMARY + HACK UNDER ATM + PULL OWN VEHICLE + ATM FALLBACK)
 
   Patch:
     A: pinTargetY ล็อกได้ทุก Y (แก้รถตกแมพ)
@@ -9,8 +9,9 @@
     D: Safe Platform กันตกสำรอง (ตาม pinTargetY)
     E: StandGap ขยายตามขนาดรถ
     F: ใต้ดินเป็นค่าเริ่มต้น Y=240.5 / แฮก Y=247 / ร้าน Y=247 + pin ตัวละคร
-    G: ✅ เพิ่มระบบ "ดึงรถของฉันมาที่ตัว" + ตรวจ Owner (ไม่ดึงรถคนอื่น)
+    G: ✅ ดึงรถของฉันมาที่ตัว + ตรวจ Owner (ไม่ดึงรถคนอื่น)
     H: ✅ เสกรถแล้วดึงมาที่ตัวอัตโนมัติ + ปุ่ม UI
+    I: ✅ ถอน/ฝากไม่สำเร็จ → เปลี่ยนตู้อัตโนมัติ (fallback สูงสุด 5/4 ตู้)
 ==========================================================================]]
 
 local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
@@ -281,9 +282,6 @@ local function AutoATM_All()
 		if hrp and hum then return char, hrp, hum end
 	end
 
-	-- ==========================================================
-	-- ✅ G: ตรวจสอบว่ารถเป็นของผู้เล่นคนนี้จริง
-	-- ==========================================================
 	function Veh.isMine(model)
 		if not model then return false end
 		local myId   = tostring(LocalPlayer.UserId)
@@ -309,16 +307,12 @@ local function AutoATM_All()
 		return false
 	end
 
-	-- ==========================================================
-	-- ✅ G: ดึงรถของฉันมาที่ตัว
-	-- ==========================================================
 	function Veh.pull()
 		local char, hrp = getCharData()
 		if not hrp then return false, "ไม่พบตัวละคร" end
 
 		local bestModel, bestDist
 
-		-- Pass 1: หาจาก ProximityPrompt ในแผนที่
 		for _, obj in ipairs(workspace:GetDescendants()) do
 			if obj:IsA("ProximityPrompt") and obj.Parent and obj.Parent.Name == "DrivePromptAttachment" then
 				local model = obj:FindFirstAncestorOfClass("Model")
@@ -332,7 +326,6 @@ local function AutoATM_All()
 			end
 		end
 
-		-- Pass 2: หาจาก Workspace.Vehicles
 		if not bestModel then
 			local vf = Workspace:FindFirstChild("Vehicles")
 			if vf then
@@ -364,9 +357,6 @@ local function AutoATM_All()
 		return true, bestModel.Name
 	end
 
-	-- ==========================================================
-	-- ✅ G: เลือก prompt — เลือกรถของเราเสมอ
-	-- ==========================================================
 	local function findVehiclePromptInWorkspace(targetName)
 		if not targetName then return nil end
 		local targetNameLower = string.lower(targetName)
@@ -405,9 +395,6 @@ local function AutoATM_All()
 		return nil
 	end
 
-	-- ==========================================================
-	-- ✅ H: ensureSeated — เสก + ดึงรถมาที่ตัว + ขึ้นนั่ง
-	-- ==========================================================
 	function Veh.ensureSeated(maxTries)
 		for _ = 1, (maxTries or 6) do
 			if not alive() then return false end
@@ -423,17 +410,14 @@ local function AutoATM_All()
 				continue
 			end
 
-			-- 1) หารถที่มีอยู่ก่อน
 			local prompt = findVehiclePromptInWorkspace(name)
 
-			-- 2) ถ้าไม่เจอ → สั่งเสก
 			if not prompt then
 				say("กำลังสั่งเสกรถ...")
 				NetGet("toggle_equip_item", guid)
 				task.wait(1.5)
 			end
 
-			-- 3) ดึงรถของเรามาที่ตัว (ทั้งกรณีเสกใหม่และมีอยู่แล้ว)
 			say("ดึงรถของฉันมาที่ตัว...")
 			local pullOk, pullRes = Veh.pull()
 			if pullOk then
@@ -443,7 +427,6 @@ local function AutoATM_All()
 			end
 			task.wait(0.4)
 
-			-- 4) หา prompt อีกครั้งหลังดึง
 			prompt = findVehiclePromptInWorkspace(name)
 			if prompt then
 				say("กำลังวาปไปขึ้น [" .. tostring(name) .. "]...")
@@ -2463,12 +2446,28 @@ end -- Hack
 		return c.ready
 	end
 
+	-- ==========================================================
+	-- ✅ I: Bank fallback — ตู้ไหนถอน/ฝากไม่ผ่าน → เปลี่ยนตู้
+	-- ==========================================================
+	local badBankUntil = {}
+
+	local function sortATMsByDist(fromPos)
+		local list = Drive.collectATMs()
+		table.sort(list, function(a, b)
+			return Drive.flatDist(a:GetPivot().Position, fromPos)
+				< Drive.flatDist(b:GetPivot().Position, fromPos)
+		end)
+		return list
+	end
+
 	local function pickATM(fromPos, forHack)
 		local best, bd
 		local now = os.clock()
 		for _, a in ipairs(Drive.collectATMs()) do
 			local skip = false
-			if forHack then
+			local bk = badBankUntil[Drive.atmKey(a)]
+			if bk and bk > now then skip = true end
+			if not skip and forHack then
 				local bu = badUntil[Drive.atmKey(a)]
 				skip = (bu and bu > now) or atmState(a) == false
 			end
@@ -2585,6 +2584,78 @@ end -- Hack
 		end
 	end
 
+	-- ==========================================================
+	-- ✅ I: ถอนเงินแบบ fallback (ลองหลายตู้)
+	-- ==========================================================
+	local function tryWithdrawAnywhere(amount, fromPos, maxTries)
+		maxTries = maxTries or 5
+		local list = sortATMsByDist(fromPos)
+		local tried = 0
+		for _, atm in ipairs(list) do
+			if not alive() then return false end
+			local key = Drive.atmKey(atm)
+			local bu = badBankUntil[key]
+			if not (bu and bu > os.clock()) then
+				tried += 1
+				say(("ถอน $%s ที่ %s (ครั้งที่ %d/%d)"):format(fmt(amount), atm.Name, tried, maxTries))
+				local visited = false
+				if visitATM(atm) then
+					visited = true
+					task.wait(0.3)
+					if Bank.withdraw(amount) then
+						say("✅ ถอนเงินสำเร็จ")
+						return true
+					end
+					say("⚠ ตู้นี้ถอนไม่ผ่าน — เปลี่ยนตู้")
+					badBankUntil[key] = os.clock() + 30
+				else
+					say("⚠ ไปตู้นี้ไม่ได้ — เปลี่ยนตู้")
+					badBankUntil[key] = os.clock() + 15
+				end
+				unpinChar()
+				if not Veh.ensureSeated() then return false end
+				if Cfg.UndergroundMode then Drive.warpToUnderground() end
+				if tried >= maxTries then break end
+			end
+		end
+		return false
+	end
+
+	-- ==========================================================
+	-- ✅ I: ฝากเงินแบบ fallback (คืนตู้ที่ใช้ได้ด้วย)
+	-- ==========================================================
+	local function tryDepositAnywhere(amount, fromPos, maxTries)
+		maxTries = maxTries or 4
+		local list = sortATMsByDist(fromPos)
+		local tried = 0
+		for _, atm in ipairs(list) do
+			if not alive() then return false end
+			local key = Drive.atmKey(atm)
+			local bu = badBankUntil[key]
+			if not (bu and bu > os.clock()) then
+				tried += 1
+				say(("ฝาก $%s ที่ %s (ครั้งที่ %d/%d)"):format(fmt(amount), atm.Name, tried, maxTries))
+				if visitATM(atm) then
+					task.wait(0.2)
+					if Bank.deposit(amount) then
+						say("✅ ฝากเงินสำเร็จ")
+						return true, atm
+					end
+					say("⚠ ตู้นี้ฝากไม่ผ่าน — เปลี่ยนตู้")
+					badBankUntil[key] = os.clock() + 30
+				else
+					say("⚠ ไปตู้นี้ไม่ได้ — เปลี่ยนตู้")
+					badBankUntil[key] = os.clock() + 15
+				end
+				unpinChar()
+				if not Veh.ensureSeated() then return false end
+				if Cfg.UndergroundMode then Drive.warpToUnderground() end
+				if tried >= maxTries then break end
+			end
+		end
+		return false
+	end
+
 	local function cycle()
 		unpinChar()
 		if not Veh.ensureSeated() then task.wait(1.5) return end
@@ -2603,13 +2674,9 @@ end -- Hack
 			end
 
 			if hand < cost then
-				local atm = pickATM(myPos(), false)
-				if not atm then stopAll("ไม่พบตู้ ATM") return end
-				if not visitATM(atm) then return end
 				local need = math.ceil(cost - hand)
-				say("ถอนเงิน $" .. fmt(need))
-				if not Bank.withdraw(need) then
-					stopAll("ถอนเงินไม่สำเร็จ")
+				if not tryWithdrawAnywhere(need, myPos(), 5) then
+					stopAll("ถอนเงินไม่สำเร็จ (ลอง 5 ตู้แล้ว)")
 					return
 				end
 				task.wait(0.5)
@@ -2667,17 +2734,21 @@ end -- Hack
 
 			local leftover = math.floor((getMoney()) - Cfg.KeepOnHand)
 			if Cfg.AutoDeposit and leftover > 0 then
-				local atm = pickATM(myPos(), false)
-				if atm and visitATM(atm) then
-					say("ฝากเงินที่เหลือ $" .. fmt(leftover))
-					if not Bank.deposit(leftover) then
-						notify("ฝากเงินไม่สำเร็จ", "ข้ามไปแฮกต่อ")
-					end
+				local ok, usedATM = tryDepositAnywhere(leftover, myPos(), 4)
+				if ok then
 					task.wait(0.5)
-					if atmReadyLive(atm) then
-						hackAt(atm)
+					if usedATM and atmReadyLive(usedATM) then
+						hackAt(usedATM)
 						return
 					end
+					unpinChar()
+					if not Veh.ensureSeated() then return end
+					if Cfg.UndergroundMode then Drive.warpToUnderground() end
+				else
+					notify("ฝากเงินไม่สำเร็จ", "ลอง 4 ตู้แล้ว — ข้ามไปแฮกต่อ")
+					unpinChar()
+					if not Veh.ensureSeated() then return end
+					if Cfg.UndergroundMode then Drive.warpToUnderground() end
 				end
 			end
 		end
@@ -2752,7 +2823,7 @@ end -- Hack
 	------------------------------------------------------------
 	local Window = WindUI:CreateWindow({
 		Title = "Auto ATM Hub",
-		Author = "ใต้ดิน Y=240.5 • แฮก Y=247 • ดึงรถได้",
+		Author = "ใต้ดิน Y=240.5 • แฮก Y=247 • ดึงรถ + fallback ตู้",
 		Icon = "banknote",
 		Folder = "AutoATMHub",
 		Theme = "Dark",
@@ -2857,7 +2928,6 @@ end -- Hack
 	local TabDrive = Window:Tab({ Title = "ขับรถ", Icon = "car" })
 	local DC = Drive.CONFIG
 
-	-- ✅ H: ปุ่มดึงรถของฉัน
 	TabDrive:Button({
 		Title = "🚗 ดึงรถของฉันมาที่ตัว",
 		Desc = "วาร์ปรถส่วนตัว (Owner = คุณ) มาข้างหน้าตัวละคร",
@@ -3004,6 +3074,15 @@ end -- Hack
 		end,
 	})
 	TabDrive:Button({
+		Title = "ทดสอบ: ถอนเงินแบบ fallback ($100)",
+		Callback = function()
+			runManual("ทดสอบถอนเงิน", function()
+				local ok = tryWithdrawAnywhere(100, myPos(), 5)
+				notify("ทดสอบถอนเงิน", ok and "สำเร็จ" or "ล้มเหลว")
+			end)
+		end,
+	})
+	TabDrive:Button({
 		Title = "หยุดการทดสอบ / หยุดรถ",
 		Color = Color3.fromHex("#c0392b"),
 		Callback = function() stopAll("หยุดแล้ว") end,
@@ -3058,7 +3137,7 @@ end -- Hack
 	genv.__AutoATM = { Destroy = fullDestroy }
 	say(("พร้อมใช้งาน — ใต้ดิน Y=%.1f • แฮก Y=%.1f • ร้าน Y=%.1f"):format(
 		Cfg.UndergroundY, Cfg.HackY, Cfg.ShopWarpY))
-	notify("Auto ATM Hub", "โหลดเสร็จ (Underground + Hack Under ATM + Pull Vehicle)")
+	notify("Auto ATM Hub", "โหลดเสร็จ (Underground + Hack + Pull + Bank fallback)")
 end
 
 AutoATM_All()
