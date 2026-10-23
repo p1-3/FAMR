@@ -37,7 +37,7 @@ end
 local CONFIG = {
 	P1 = Vector3.new(161.06, 255.29, 219.49),
 	P2 = Vector3.new(163.97, 255.32, 203.15),
-	Speed = 24, MinSpeed = 8, MaxSpeed = 120,
+	Speed = 29, MinSpeed = 8, MaxSpeed = 120,
 	ArriveRadius = 3, SegmentLength = 160, StepLen = 8,
 	MaxTries = 10, JumpHeight = 3.5, VisitedRadius = 25,
 	StockTimeout = 12, PickupTimeout = 25,
@@ -529,21 +529,11 @@ player.ChildAdded:Connect(function(c)
 	if c:IsA("Backpack") then lockBackpack(c) end
 end)
 
-local function getPing()
-	local ns = playerGui:FindFirstChild("NetworkStats")
-	local pl = ns and ns:FindFirstChild("PingLabel")
-	if pl and type(pl.Text) == "string" then
-		local n = tonumber(pl.Text:match("%d+"))
-		if n and n >= 0 and n <= 1500 then return n end
-	end
-	return nil
-end
-
 ------------------------------------------------------------
 -- ตัวช่วยหาทาง
 ------------------------------------------------------------
 CONFIG.Hurdle = true
-CONFIG.MaxHurdle = 9
+CONFIG.MaxHurdle = 20
 CONFIG.AStarNodes = 1200
 S.brute = true
 S.guide = true
@@ -2031,7 +2021,6 @@ end
 local setFStatus = makeLive(FarmTab, "📊 สถานะ", "พร้อม")
 local setFStep   = makeLive(FarmTab, "🧭 ขั้นตอน", "-")
 local setFNum    = makeLive(FarmTab, "🔢 เลขล่าสุดที่เกมส่ง", "—")
-local setFPing   = makeLive(FarmTab, "📶 Ping / Net", "-")
 FarmTab:Divider()
 
 FarmTab:Toggle({
@@ -2072,7 +2061,7 @@ FarmTab:Toggle({
 FarmTab:Slider({
 	Title = "ความสูงที่ข้ามได้ (studs)",
 	Step = 1,
-	Value = { Min = 3, Max = 20, Default = CONFIG.MaxHurdle },
+	Value = { Min = 3, Max = 30, Default = CONFIG.MaxHurdle },
 	Callback = function(v) CONFIG.MaxHurdle = v end,
 })
 FarmTab:Toggle({
@@ -2169,8 +2158,6 @@ task.spawn(function()
 		push("fs", setFStatus, UI.status)
 		push("fst", setFStep, UI.step)
 		push("fn", setFNum, UI.num)
-		local ping = getPing()
-		push("fp", setFPing, ("%s • counter: %s"):format(ping and (ping .. " ms") or "-", NetTbl and "OK" or "FAIL"))
 	end
 end)
 
