@@ -1,0 +1,2063 @@
+--[[==========================================================================
+  COMBINED AUTO FARM & ATM HUB
+  - ฟาร์มกล่อง (Auto Farm Box)
+  - ฟาร์ม ATM (Auto ATM)
+  - ตั้งค่า Y (ตั้งค่าใต้ดิน/แฮก/ซื้อของ/fallback)
+  - ฝากเงิน (Deposit)
+  - ปรับค่าเริ่มต้น ATM/ร้าน เป็น Y = 252
+==========================================================================]]
+
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+local Players            = game:GetService("Players")
+local TweenService       = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local Workspace          = game:GetService("Workspace")
+local RS                 = game:GetService("ReplicatedStorage")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local Remotes   = RS:WaitForChild("Remotes")
+local RemoteGet = Remotes:WaitForChild("Get")
+local RemoteSend= Remotes:WaitForChild("Send")
+
+local okData, DataModule = pcall(require, RS.Modules.Core.Data)
+local okSl, Slider = pcall(require, RS.Modules.Game.Minigames.SliderMinigame)
+if not okSl then Slider = nil end
+local okKb, Keybinds = pcall(require, RS.Modules.Game.Keybinds)
+if not okKb then Keybinds = nil end
+
+------------------------------------------------------------
+-- Net / Data / Money
+------------------------------------------------------------
+local NetTbl
+local function refreshTbl()
+    pcall(function()
+        local Net = require(RS.Modules.Core.Net)
+        local ups = debug.getupvalues(Net.get)
+        for _, upv in pairs(ups) do
+            if type(upv) == "table" and upv.func ~= nil and upv.event ~= nil then NetTbl = upv return end
+        end
+        for _, upv in pairs(ups) do
+            if type(upv) == "table" and upv.func ~= nil then NetTbl = upv return end
+        end
+    end)
+    if not NetTbl then
+        pcall(function()
+            for _, v in ipairs(getgc(true)) do
+                if typeof(v) == "table" and rawget(v, "event") and rawget(v, "func") then NetTbl = v break end
+            end
+        end)
+    end
+    return NetTbl ~= nil
+end
+refreshTbl()
+
+local function bumpEvent()
+    if not NetTbl then refreshTbl() end
+    if NetTbl and type(NetTbl.event) == "number" then
+        NetTbl.event += 1
+        return NetTbl.event
+    end
+    return nil
+end
+
+local function callGet(action, ...)
+    if not NetTbl then refreshTbl() end
+    if not NetTbl then return false end
+    NetTbl.func = (NetTbl.func or 0) + 1
+    local a = table.pack(...)
+    local ok, res = pcall(function()
+        return RemoteGet:InvokeServer(NetTbl.func, action, table.unpack(a, 1, a.n))
+    end)
+    return ok and res == true
+end
+
+local function NetSend(action, ...)
+    if not NetTbl then refreshTbl() end
+    if not NetTbl then return false end
+    NetTbl.event = (NetTbl.event or 0) + 1
+    local seq = NetTbl.event
+    local a = table.pack(...)
+    local ok = pcall(function()
+        RemoteSend:FireServer(seq, action, table.unpack(a, 1, a.n))
+    end)
+    return ok
+end
+
+local function NetGet(action, ...)
+    if not NetTbl then refreshTbl() end
+    if not NetTbl then return false end
+    NetTbl.func = (NetTbl.func or 0) + 1
+    local seq = NetTbl.func
+    local a = table.pack(...)
+    local ok, res = pcall(function()
+        return RemoteGet:InvokeServer(seq, action, table.unpack(a, 1, a.n))
+    end)
+    return ok, res
+end
+
+local function getMoney()
+    local m = DataModule and DataModule.money
+    if type(m) ~= "table" then return 0, 0 end
+    return tonumber(m.hand) or 0, tonumber(m.bank) or 0
+end
+
+local function fmt(n)
+    n = tonumber(n) or 0
+    local s = tostring(math.floor(n))
+    local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    return (out:gsub("^,", ""))
+end
+
+local function countItem(name)
+    local items = DataModule and DataModule.items
+    if type(items) ~= "table" then return 0 end
+    local want = tostring(name):lower()
+    local total = 0
+    for _, cat in pairs(items) do
+        if type(cat) == "table" then
+            for itemName, group in pairs(cat) do
+                if tostring(itemName):lower() == want and type(group) == "table" then
+                    local c = 0
+                    for _, e in ipairs(group) do
+                        local q = type(e) == "table" and tonumber(e.amount or e.count or e.quantity or e.stack) or nil
+                        c += q or 1
+                    end
+                    if c == 0 then
+                        for _, e in pairs(group) do
+                            if type(e) == "table" then c += 1 end
+                        end
+                    end
+                    total += c
+                end
+            end
+        end
+    end
+    return total
+end
+
+------------------------------------------------------------
+-- 1. FARM BOX SCRIPT
+------------------------------------------------------------
+local FarmConfig = {
+    P1 = Vector3.new(161.06, 255.29, 219.49),
+    P2 = Vector3.new(163.97, 255.32, 203.15),
+    Speed = 29, MinSpeed = 8, MaxSpeed = 120,
+    ArriveRadius = 3, SegmentLength = 160, StepLen = 8,
+    MaxTries = 10, JumpHeight = 3.5, VisitedRadius = 25,
+    StockTimeout = 12, PickupTimeout = 25,
+    FirstShelfIndex = 2, ResumeDelay = 3,
+    HealThreshold = 50, HealCheckInterval = 0.3,
+    SpamBurst = 6,
+    PullThreshold = 10,
+    BoxMax = 5,
+    DoorStep = 5,
+    StuckTime = 3,
+    UnstickDist = 12,
+    Hurdle = true, MaxHurdle = 20, AStarNodes = 1200,
+}
+local FarmState = {
+    running = false, runId = 0, auto = false, depositNow = false,
+    antiRagdoll = true, infStamina = true, autoHeal = true,
+    autoRespawn = true, doorKiller = true, toolLock = true,
+    noclipAll = true, brute = true, guide = true, unstick = true,
+}
+local FarmUI = { status = "พร้อม", step = "-", num = "—" }
+local function setFarmStatus(t) FarmUI.status = t end
+local function setFarmStep(t) FarmUI.step = t end
+local FarmMove = {}
+local hoverH = 3
+local applied = false
+local lastStock, lastNum = 0, nil
+
+local rayParams1 = RaycastParams.new()
+rayParams1.FilterType = Enum.RaycastFilterType.Exclude
+rayParams1.IgnoreWater = true
+rayParams1.RespectCanCollide = true
+
+local function flatDist(a, b) return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude end
+local function flatUnit(v)
+    local f = Vector3.new(v.X, 0, v.Z)
+    if f.Magnitude < 1e-4 then return nil end
+    return f.Unit
+end
+
+local function posOf(inst)
+    if inst:IsA("BasePart") then return inst.Position end
+    if inst:IsA("Attachment") then return inst.WorldPosition end
+    if inst:IsA("Model") then
+        local ok, cf = pcall(function() return inst:GetPivot() end)
+        if ok then return cf.Position end
+    end
+    local p = inst:FindFirstAncestorWhichIsA("BasePart")
+    return p and p.Position or nil
+end
+
+local function quick11()
+    local n = Workspace:FindFirstChild("Map")
+    n = n and n:FindFirstChild("Tiles")
+    n = n and n:FindFirstChild("GasStationTile")
+    return n and n:FindFirstChild("Quick11")
+end
+local function getInterior()
+    local q = quick11()
+    return q and q:FindFirstChild("Interior")
+end
+local function getDoorSystem()
+    local i = getInterior()
+    return i and i:FindFirstChild("DoorSystem")
+end
+
+local cachedDoorPos = nil
+local cachedDoors = {}
+local function captureDoorPos()
+    local ds = getDoorSystem()
+    if ds then
+        local list, positions = {}, {}
+        for _, d in ipairs(ds:GetDescendants()) do
+            if d:IsA("BasePart") then
+                positions[#positions + 1] = d.Position
+                list[#list + 1] = { pos = d.Position, cf = d.CFrame, size = d.Size }
+            end
+        end
+        if #positions > 0 then
+            cachedDoors = list
+            local sum = Vector3.zero
+            for _, p in ipairs(positions) do sum += p end
+            cachedDoorPos = sum / #positions
+            return cachedDoorPos
+        end
+    end
+    return cachedDoorPos
+end
+
+local DepCfg = { AutoOn = false, Mode = "all", Threshold = 500, Cooldown = 5 }
+local totalDeposited, depositCount, lastResult = 0, 0, "—"
+local lastDepositTry = 0
+local modeLabel = { excess = "ฝากส่วนเกิน (เก็บเกณฑ์ไว้)", all = "ฝากทั้งหมด (เมื่อถึงเกณฑ์)" }
+
+local function computeDeposit(hand)
+    if DepCfg.Mode == "all" then
+        return hand >= DepCfg.Threshold and hand > 0 and hand or 0
+    end
+    return hand > DepCfg.Threshold and (hand - DepCfg.Threshold) or 0
+end
+
+pcall(function()
+    local old
+    old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local m = getnamecallmethod()
+        if m == "InvokeServer" or m == "FireServer" then
+            local a1, a2 = ...
+            if typeof(self) == "Instance" and type(a1) == "number" and type(a2) == "string" then
+                lastNum = a1
+                if a2 == "player_stocked_shelf" then lastStock = os.clock() end
+            end
+        end
+        return old(self, ...)
+    end))
+end)
+
+local AGENT_PROFILES = { { r = 2, h = 5 }, { r = 1.2, h = 5 }, { r = 0.6, h = 4 } }
+local function groundAt(x, z, refY)
+    local r = Workspace:Raycast(Vector3.new(x, refY + 8, z), Vector3.new(0, -40, 0), rayParams1)
+    return r and r.Position.Y or nil
+end
+local function bodyBlockedAt(a, b, params, rise)
+    local dir = b - a
+    if dir.Magnitude < 0.1 then return false end
+    local flat = flatUnit(dir)
+    local center = a + Vector3.new(0, 2.8 + (rise or 0), 0)
+    local cf = flat and CFrame.lookAt(center, center + flat) or CFrame.new(center)
+    local w = 2 * 1.6
+    return Workspace:Blockcast(cf, Vector3.new(w, 3.2, w), dir, params) ~= nil
+end
+local function bodyBlocked(a, b) return bodyBlockedAt(a, b, rayParams1, 0) end
+
+local threadRun = setmetatable({}, { __mode = "k" })
+local function isFarmAlive()
+    local id = threadRun[coroutine.running()]
+    if id and id ~= FarmState.runId then return false end
+    return FarmState.running and FarmState.runId == FarmMove.id and FarmMove.root and FarmMove.root.Parent
+        and FarmMove.hum and FarmMove.hum.Parent and FarmMove.hum.Health > 0
+end
+
+local function noclipBegin()
+    if not FarmMove.char then return end
+    FarmMove.ncSaved = FarmMove.ncSaved or {}
+    for _, d in ipairs(FarmMove.char:GetDescendants()) do
+        if d:IsA("BasePart") then FarmMove.ncSaved[d] = d.CanCollide end
+    end
+    if not FarmMove.ncConn then
+        FarmMove.ncConn = RunService.Stepped:Connect(function()
+            for part in pairs(FarmMove.ncSaved or {}) do
+                if part.Parent then part.CanCollide = false end
+            end
+        end)
+    end
+end
+local function noclipEnd()
+    if not FarmMove.ncConn then return end
+    FarmMove.ncConn:Disconnect()
+    FarmMove.ncConn = nil
+    for part, v in pairs(FarmMove.ncSaved or {}) do
+        if part.Parent then part.CanCollide = v end
+    end
+    FarmMove.ncSaved = nil
+end
+
+local function tweenTo(p, heading)
+    local w0 = os.clock()
+    while FarmMove.unstick and isFarmAlive() and os.clock() - w0 < 8 do task.wait(0.05) end
+    local cfv = FarmMove.cfv
+    local cur = cfv.Value.Position
+    FarmMove.moveDir = heading
+    FarmMove.hum.WalkSpeed = FarmConfig.Speed
+    local T = math.max((p - cur).Magnitude / FarmConfig.Speed, 0.03)
+    if FarmMove.tween then FarmMove.tween:Cancel() end
+    FarmMove.tween = TweenService:Create(cfv, TweenInfo.new(T, Enum.EasingStyle.Linear), { Value = CFrame.lookAt(p, p + heading) })
+    FarmMove.tween:Play()
+    task.wait(math.max(T - 0.05, 0.01))
+end
+
+local function walkNoclipOnce(target, keepY)
+    local root, cfv = FarmMove.root, FarmMove.cfv
+    cfv.Value = root.CFrame
+    FarmMove.pulled = false
+    local start = cfv.Value.Position
+    local gy = groundAt(target.X, target.Z, target.Y)
+    local groundY = gy and (gy + hoverH) or nil
+    local goal
+    if keepY and groundY and math.abs(start.Y - groundY) <= 6 then
+        goal = Vector3.new(target.X, start.Y, target.Z)
+    elseif groundY then
+        goal = Vector3.new(target.X, groundY, target.Z)
+    else
+        goal = target
+    end
+    noclipBegin()
+    local n = math.max(1, math.ceil((goal - start).Magnitude / FarmConfig.StepLen))
+    local heading = flatUnit(goal - start) or Vector3.new(0, 0, -1)
+    for k = 1, n do
+        if not isFarmAlive() then noclipEnd() return false end
+        if FarmMove.pulled then
+            FarmMove.pulled = false
+            noclipEnd()
+            return false
+        end
+        tweenTo(start:Lerp(goal, k / n), heading)
+    end
+    if FarmMove.tween and FarmMove.tween.PlaybackState == Enum.PlaybackState.Playing and isFarmAlive() then
+        FarmMove.tween.Completed:Wait()
+    end
+    noclipEnd()
+    FarmMove.moveDir = nil
+    local p = cfv.Value.Position
+    return isFarmAlive() and flatDist(p, goal) <= FarmConfig.ArriveRadius + 1 and math.abs(p.Y - goal.Y) <= 3
+end
+
+local function walkNoclip(target, keepY)
+    for attempt = 1, 4 do
+        if walkNoclipOnce(target, keepY) then return true end
+        if not isFarmAlive() then return false end
+        task.wait(0.15)
+    end
+    return false
+end
+
+local function goToFree(target, maxFails)
+    if FarmState.noclipAll then
+        if walkNoclip(target, true) then return true end
+        if not isFarmAlive() then return false end
+    end
+    return false -- fallback to simple if needed, omitted for brevity in combined
+end
+
+local function findBoxTool()
+    local containers = { player.Character, player:FindFirstChildOfClass("Backpack") }
+    for i = 1, 2 do
+        local c = containers[i]
+        if c then
+            for _, t in ipairs(c:GetChildren()) do
+                if t:IsA("Tool") and (t:FindFirstChild("Extra1") or t.Name:lower():find("box")) then return t end
+            end
+        end
+    end
+end
+local function equipBox()
+    local t = findBoxTool()
+    if t and FarmMove.hum and t.Parent ~= player.Character then
+        pcall(function() FarmMove.hum:EquipTool(t) end)
+    end
+    return t
+end
+local function boxCount(tool)
+    local c = 0
+    for i = 1, FarmConfig.BoxMax do
+        local e = tool:FindFirstChild("Extra" .. i)
+        if e then
+            local vis = e:IsA("BasePart") and e.Transparency < 1
+            for _, v in ipairs(e:GetChildren()) do
+                if v:IsA("BasePart") and v.Transparency < 1 then vis = true break end
+            end
+            if vis then c = i end
+        end
+    end
+    return c
+end
+local function jobFolder()
+    local i = getInterior()
+    return i and i:FindFirstChild("ShelfStockingJob")
+end
+
+local function nearestNormalBoxPrompt()
+    local jf = jobFolder()
+    if not jf then return nil end
+    local best, bd = nil, math.huge
+    local rootPos = FarmMove.root.Position
+    for _, d in ipairs(jf:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled then
+            local par = d.Parent
+            if par and (par.Name:find("NormalBox") or (par.Parent and par.Parent.Name:find("NormalBox"))) then
+                local p = posOf(par)
+                if p then
+                    local dist = (p - rootPos).Magnitude
+                    if dist < bd then best, bd = d, dist end
+                end
+            end
+        end
+    end
+    return best, bd
+end
+
+local function shelfSpots()
+    local spots = {}
+    local jf = jobFolder()
+    if not jf then return spots end
+    local shelves = jf:FindFirstChild("Shelves")
+    if shelves then
+        for i, sh in ipairs(shelves:GetChildren()) do
+            local att = sh:FindFirstChildWhichIsA("Attachment", true)
+            if att then spots[#spots + 1] = { idx = i, pos = att.WorldPosition, name = sh.Name } end
+        end
+    end
+    table.sort(spots, function(a, b)
+        local ka = a.idx == FarmConfig.FirstShelfIndex and 0 or a.idx
+        local kb = b.idx == FarmConfig.FirstShelfIndex and 0 or b.idx
+        return ka < kb
+    end)
+    return spots
+end
+
+local function pickupBox()
+    setFarmStep("📦 รับกล่อง (กดรัว)")
+    local t0 = os.clock()
+    local lastCount, lastChange = -1, os.clock()
+    while isFarmAlive() and os.clock() - t0 < FarmConfig.PickupTimeout do
+        FarmMove.pulled = false
+        local tool = findBoxTool()
+        if tool then
+            local count = boxCount(tool)
+            if count >= FarmConfig.BoxMax then break end
+            if count ~= lastCount then lastCount, lastChange = count, os.clock() end
+            if os.clock() - lastChange > 1.5 then break end
+        end
+        local prompt, dist = nearestNormalBoxPrompt()
+        if prompt then
+            if fireproximityprompt then
+                for _ = 1, FarmConfig.SpamBurst do pcall(fireproximityprompt, prompt) end
+            end
+        end
+        task.wait(0.03)
+    end
+    local t = equipBox()
+    return t ~= nil
+end
+
+local function depositAmount(amount)
+    amount = math.floor(tonumber(amount) or 0)
+    if amount <= 0 then return false end
+    if callGet("transfer_funds", "hand", "bank", amount) then return true end
+    task.wait(0.3)
+    return callGet("transfer_funds", "hand", "bank", amount)
+end
+
+local function maybeDeposit(force)
+    if not (DepCfg.AutoOn or force) then return end
+    local amount = computeDeposit((getMoney()))
+    if amount <= 0 then
+        if force then lastResult = "⚠ ยังไม่ถึงเกณฑ์ / ไม่มีเงินให้ฝาก" end
+        return
+    end
+    if not force and os.clock() - lastDepositTry < DepCfg.Cooldown then return end
+    lastDepositTry = os.clock()
+    local atm = getInterior() and getInterior():FindFirstChild("ATM")
+    if atm and walkNoclip(posOf(atm), true) then
+        if depositAmount(amount) then
+            lastResult = ("✅ ฝาก $%s สำเร็จ (ATM)"):format(fmt(amount))
+        end
+    end
+end
+
+local function checkDepositRequests()
+    if FarmState.depositNow then
+        FarmState.depositNow = false
+        maybeDeposit(true)
+    else
+        maybeDeposit(false)
+    end
+end
+
+local function mainFlow()
+    setFarmStatus("กำลังฟาร์ม")
+    while isFarmAlive() do
+        checkDepositRequests()
+        if not findBoxTool() then
+            if pickupBox() then
+            else task.wait(1) end
+        else
+            equipBox()
+            local spots = shelfSpots()
+            if #spots > 0 then
+                for _, sp in ipairs(spots) do
+                    if not isFarmAlive() or not findBoxTool() then break end
+                    setFarmStep(("🗄 ไปชั้น #%d (%s)"):format(sp.idx, sp.name))
+                    if goToFree(sp.pos, 3) then
+                        setFarmStep(("⏳ ยืนรอวางกล่อง ชั้น #%d"):format(sp.idx))
+                        local base = lastStock
+                        local t0 = os.clock()
+                        while isFarmAlive() and os.clock() - t0 < FarmConfig.StockTimeout do
+                            if lastStock > base then break end
+                            task.wait(0.2)
+                        end
+                    end
+                end
+            else
+                task.wait(2)
+            end
+        end
+        task.wait(0.2)
+    end
+end
+
+local function depositOnlyFlow()
+    setFarmStatus("ฝากเงิน")
+    maybeDeposit(true)
+    return "ฝากเสร็จแล้ว"
+end
+
+local function cleanupMover()
+    noclipEnd()
+    if FarmMove.tween then FarmMove.tween:Cancel() end
+    if FarmMove.conn then FarmMove.conn:Disconnect() end
+    if FarmMove.watch then FarmMove.watch:Disconnect() FarmMove.watch = nil end
+    pcall(function() RunService:UnbindFromRenderStep("AutoFarmMove") end)
+    FarmMove.moveDir = nil
+    if FarmMove.hum and FarmMove.hum.Parent then
+        FarmMove.hum:Move(Vector3.zero, false)
+        if FarmMove.prevSpeed then FarmMove.hum.WalkSpeed = FarmMove.prevSpeed end
+    end
+    if FarmMove.root and FarmMove.root.Parent then
+        FarmMove.root.AssemblyLinearVelocity = Vector3.zero
+        FarmMove.root.AssemblyAngularVelocity = Vector3.zero
+    end
+    if FarmMove.cfv then FarmMove.cfv:Destroy() end
+    FarmMove.cfv, FarmMove.conn, FarmMove.tween = nil, nil, nil
+end
+
+local function stopFarmRun(msg)
+    if not FarmState.running and not FarmMove.cfv then return end
+    FarmState.running = false
+    FarmState.runId += 1
+    cleanupMover()
+    setFarmStatus(msg or "หยุดแล้ว")
+    setFarmStep("-")
+end
+
+local function startFarmRun(flow)
+    if FarmState.running then return end
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hum and root) or hum.Health <= 0 then setFarmStatus("❌ ไม่พบตัวละคร") return end
+
+    FarmState.running = true
+    FarmState.runId += 1
+    FarmMove = { char = char, hum = hum, root = root, id = FarmState.runId, prevSpeed = hum.WalkSpeed }
+    
+    local cfv = Instance.new("CFrameValue")
+    cfv.Value = root.CFrame
+    FarmMove.cfv = cfv
+    FarmMove.conn = cfv.Changed:Connect(function(v)
+        if root.Parent then
+            root.CFrame = v
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+    
+    RunService:BindToRenderStep("AutoFarmMove", Enum.RenderPriority.Input.Value + 1, function()
+        if FarmMove.moveDir and hum.Parent then hum:Move(FarmMove.moveDir, false) end
+    end)
+
+    local myId = FarmState.runId
+    task.spawn(function()
+        threadRun[coroutine.running()] = myId
+        local ok, res = pcall(flow)
+        if FarmState.runId == myId then
+            stopFarmRun(ok and (res or "จบการทำงาน") or "❌ เกิดข้อผิดพลาด")
+        end
+    end)
+end
+
+------------------------------------------------------------
+-- 2. AUTO ATM SCRIPT
+------------------------------------------------------------
+local CHIP_PRICE = { HackToolBasic = 10, HackToolPro = 150, HackToolUltimate = 350 }
+local CHIP_LIST  = { "HackToolBasic", "HackToolPro", "HackToolUltimate" }
+
+local ATMCfg = {
+    Active = false,
+    Manual = false,
+    Destroyed = false,
+    VehicleType = "car",
+    Chip = "HackToolBasic",
+    BuyQty = 5,
+    KeepOnHand = 0,
+    AutoDeposit = true,
+    ShopPoint = Vector3.new(-214.66, 255.10, 387.75),
+    AutoRepair = true,
+    HighlightATM = true,
+    UndergroundMode = true,
+    UndergroundY    = 240.5,
+    HackY           = 252, -- ปรับเป็น 252 ตามที่ขอ
+    ShopWarpY       = 252, -- ปรับเป็น 252 ตามที่ขอ
+    GroundYFallback = 255,
+}
+
+local curATMStatus, progressText = "พร้อมใช้งาน", ""
+local function setATMStatus(t) curATMStatus = tostring(t) end
+local function say(t)
+    curATMStatus = tostring(t)
+    print("[AutoATM] " .. curATMStatus)
+end
+local function isATMAlive() return (ATMCfg.Active or ATMCfg.Manual) and not ATMCfg.Destroyed end
+
+local Veh = {}
+do
+    local rememberedVehicleName, rememberedVehicleGuid = nil, nil
+    function Veh.reset() rememberedVehicleName, rememberedVehicleGuid = nil, nil end
+
+    local function ScanAndRememberVehicle(searchType)
+        if rememberedVehicleGuid and rememberedVehicleName then return rememberedVehicleName, rememberedVehicleGuid end
+        pcall(function()
+            local DM = require(RS.Modules.Core.Data)
+            if DM and DM.items then
+                for catName, catContent in pairs(DM.items) do
+                    local lowerCat = string.lower(tostring(catName))
+                    local match = false
+                    if searchType == "bike" then match = lowerCat:find("bike") or lowerCat:find("bicycle")
+                    else match = lowerCat:find("vehicle") or lowerCat:find("car") or lowerCat:find("transport") end
+                    if match and type(catContent) == "table" then
+                        for itemName, itemTable in pairs(catContent) do
+                            if type(itemTable) == "table" then
+                                for _, itemData in ipairs(itemTable) do
+                                    if type(itemData) == "table" and itemData.guid then
+                                        rememberedVehicleName = tostring(itemName)
+                                        rememberedVehicleGuid = itemData.guid
+                                        break
+                                    end
+                                end
+                            end
+                            if rememberedVehicleGuid then break end
+                        end
+                    end
+                    if rememberedVehicleGuid then break end
+                end
+            end
+        end)
+        return rememberedVehicleName, rememberedVehicleGuid
+    end
+
+    local function getCharData()
+        local char = player.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hrp and hum then return char, hrp, hum end
+    end
+
+    function Veh.isMine(model)
+        if not model then return false end
+        local myId = tostring(player.UserId)
+        local myName = player.Name
+        for _, a in ipairs({ "OwnerUserId", "OwnerId", "Owner", "PlayerUserId", "UserId", "OwnerName" }) do
+            local v = model:GetAttribute(a)
+            if v ~= nil then
+                local vs = tostring(v)
+                if vs == myId or vs == myName then return true end
+            end
+        end
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("IntValue") and (d.Name == "OwnerUserId" or d.Name == "OwnerId" or d.Name == "UserId" or d.Name == "Owner") then
+                if tostring(d.Value) == myId then return true end
+            elseif d:IsA("StringValue") and (d.Name == "OwnerUserId" or d.Name == "Owner" or d.Name == "OwnerName") then
+                if d.Value == myId or d.Value == myName then return true end
+            elseif d:IsA("ObjectValue") and (d.Name == "Owner" or d.Name == "Player") then
+                if d.Value == player then return true end
+            end
+        end
+        return false
+    end
+
+    function Veh.pull()
+        local char, hrp = getCharData()
+        if not hrp then return false, "ไม่พบตัวละคร" end
+        local bestModel, bestDist
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") and obj.Parent and obj.Parent.Name == "DrivePromptAttachment" then
+                local model = obj:FindFirstAncestorOfClass("Model")
+                if model and Veh.isMine(model) then
+                    local att = obj.Parent
+                    if att:IsA("Attachment") then
+                        local d = (att.WorldPosition - hrp.Position).Magnitude
+                        if not bestDist or d < bestDist then bestModel, bestDist = model, d end
+                    end
+                end
+            end
+        end
+        if not bestModel then
+            local vf = Workspace:FindFirstChild("Vehicles")
+            if vf then
+                for _, v in ipairs(vf:GetChildren()) do
+                    if v:IsA("Model") and Veh.isMine(v) then
+                        local d = (v:GetPivot().Position - hrp.Position).Magnitude
+                        if not bestDist or d < bestDist then bestModel, bestDist = v, d end
+                    end
+                end
+            end
+        end
+        if not bestModel then return false, "ไม่พบยานพาหนะของคุณในแมพ" end
+        local look = hrp.CFrame.LookVector
+        look = Vector3.new(look.X, 0, look.Z)
+        if look.Magnitude < 0.01 then look = Vector3.new(0, 0, -1) else look = look.Unit end
+        local targetPos = hrp.Position + look * 12 + Vector3.new(0, 3, 0)
+        local curPivot = bestModel:GetPivot()
+        bestModel:PivotTo(CFrame.new(targetPos) * (curPivot - curPivot.Position))
+        for _, d in ipairs(bestModel:GetDescendants()) do
+            if d:IsA("BasePart") then
+                d.AssemblyLinearVelocity  = Vector3.zero
+                d.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+        return true, bestModel.Name
+    end
+
+    local function findVehiclePromptInWorkspace(targetName)
+        if not targetName then return nil end
+        local targetNameLower = string.lower(targetName)
+        local char, hrp = getCharData()
+        if not hrp then return nil end
+        local owned, ownedDist = nil, nil
+        local anyMatch, anyDist = nil, nil
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") and obj.Parent and obj.Parent.Name == "DrivePromptAttachment" and obj.Enabled then
+                local model = obj:FindFirstAncestorOfClass("Model")
+                if model then
+                    local modelName = string.lower(model.Name)
+                    if string.find(modelName, targetNameLower) or string.find(targetNameLower, modelName) then
+                        local att = obj.Parent
+                        if att:IsA("Attachment") then
+                            local dist = (att.WorldPosition - hrp.Position).Magnitude
+                            if Veh.isMine(model) then
+                                if not ownedDist or dist < ownedDist then owned, ownedDist = obj, dist end
+                            else
+                                if not anyDist or dist < anyDist then anyMatch, anyDist = obj, dist end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if owned then return owned end
+        if anyMatch then return anyMatch end
+        return nil
+    end
+
+    function Veh.ensureSeated(maxTries)
+        for _ = 1, (maxTries or 6) do
+            if not isATMAlive() then return false end
+            local _, hrp, hum = getCharData()
+            if not (hum and hrp and hum.Health > 0) then task.wait(1) continue end
+            if hum.SeatPart then return true end
+            local name, guid = ScanAndRememberVehicle(ATMCfg.VehicleType)
+            if not guid then task.wait(1) continue end
+            local prompt = findVehiclePromptInWorkspace(name)
+            if not prompt then
+                NetGet("toggle_equip_item", guid)
+                task.wait(1.5)
+            end
+            Veh.pull()
+            task.wait(0.4)
+            prompt = findVehiclePromptInWorkspace(name)
+            if prompt then
+                local att = prompt.Parent
+                if att and att:IsA("Attachment") then
+                    hrp.CFrame = CFrame.new(att.WorldPosition + Vector3.new(0, 3, 0))
+                    task.wait(0.2)
+                    if typeof(fireproximityprompt) == "function" then fireproximityprompt(prompt)
+                    else prompt:InputHoldBegin() task.wait(prompt.HoldDuration + 0.05) prompt:InputHoldEnd() end
+                    task.wait(0.5)
+                end
+            end
+            task.wait(1)
+        end
+        local _, _, hum = getCharData()
+        return hum ~= nil and hum.SeatPart ~= nil
+    end
+
+    local function scanVehicleData(searchType)
+        local rName, rGuid, rData
+        pcall(function()
+            if not (DataModule and DataModule.items) then return end
+            for catName, catContent in pairs(DataModule.items) do
+                local lowerCat = string.lower(tostring(catName))
+                local match
+                if searchType == "bike" then match = lowerCat:find("bike") or lowerCat:find("bicycle")
+                else match = (lowerCat:find("car") or lowerCat:find("vehicle") or lowerCat:find("transport")) and not lowerCat:find("bike") and not lowerCat:find("bicycle") end
+                if match and type(catContent) == "table" then
+                    for itemName, itemTable in pairs(catContent) do
+                        if type(itemTable) == "table" then
+                            for _, itemData in ipairs(itemTable) do
+                                if type(itemData) == "table" and itemData.guid then
+                                    rName, rGuid, rData = tostring(itemName), itemData.guid, itemData
+                                    break
+                                end
+                            end
+                        end
+                        if rGuid then break end
+                    end
+                end
+                if rGuid then break end
+            end
+        end)
+        return rName, rGuid, rData
+    end
+
+    function Veh.health()
+        local name, _, d = scanVehicleData(ATMCfg.VehicleType)
+        if not (name and d) then return nil end
+        local cur = tonumber(d.health or d.hp or d.durability) or 0
+        local max = tonumber(d.maxHealth or d.maxHp) or 100
+        if max <= 0 then max = 100 end
+        return math.floor(cur / max * 100), cur, max, name
+    end
+
+    function Veh.repair()
+        local _, guid = scanVehicleData(ATMCfg.VehicleType)
+        if not guid then return false end
+        local g = tostring(guid)
+        if not g:match("^%{") then g = "{" .. g .. "}" end
+        return callGet("repair_vehicle", g)
+    end
+end
+
+local Drive = {}
+do
+    local DriveConfig = {
+        Speed = 60, MinSpeed = 10, MaxSpeed = 250, StepTime = 0.12,
+        TurnRate = math.rad(420), ClimbSlope = 1.0, DescendSlope = 0.7,
+        Margin = 1.2, ScanHeight = 300, ProfileSpacing = 6, StandGap = 2.5,
+        DwellTime = 1, HoverTrim = 0, MaxStep = 2.2, MaxDropCell = 3.5,
+        NavCell = 1.5, NavMaxNodes = 3500, Clearance = 0.6, ThroughDoors = true,
+        ExtraDoorKeywords = {}, StandOverrides = {}, GuideColor = Color3.fromRGB(0, 255, 255),
+        UndergroundMode = true, UndergroundY = 240.5, GroundYFallback = 255, SafePlatformDrop = 8,
+    }
+    local DriveState = {
+        running = false, runId = 0, vehicle = nil, guidePts = nil, guideDirs = nil,
+        cleanup = nil, skip = false, visited = {}, doneCount = 0, totalCount = 0, standOverride = {},
+    }
+    for k, v in pairs(DriveConfig.StandOverrides) do DriveState.standOverride[k] = v end
+    local V = { L = 6, W = 3, H = 5, hover = 3, lean = true }
+    local yawOffset = 0
+    local yawByVehicle = setmetatable({}, { __mode = "k" })
+    local curVehicle = nil
+    local frontMode = nil
+    local guideEnabled = true
+
+    local rayParams2 = RaycastParams.new()
+    rayParams2.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams2.IgnoreWater = true
+    rayParams2.RespectCanCollide = true
+
+    local Nav = {
+        R = 2.3, doors = {}, doorScanT = -1000,
+        overlap = OverlapParams.new(), inc = RaycastParams.new(),
+    }
+    Nav.overlap.FilterType = Enum.RaycastFilterType.Exclude
+    Nav.overlap.RespectCanCollide = true
+    Nav.overlap.MaxParts = 12
+    Nav.inc.FilterType = Enum.RaycastFilterType.Include
+    Nav.inc.RespectCanCollide = true
+    Nav.inc.IgnoreWater = true
+
+    local function hoverNow() return math.max(V.hover + DriveConfig.HoverTrim, 0.2) end
+    local function scanUp() return math.max(V.H, 6) end
+    local function rotY(v, ang) return CFrame.Angles(0, ang, 0) * v end
+    local function signedAngle(a, b) return math.atan2(a:Cross(b).Y, a:Dot(b)) end
+    local function turnToward(cur, want, maxAng)
+        local ang = math.clamp(signedAngle(cur, want), -maxAng, maxAng)
+        return rotY(cur, ang).Unit
+    end
+
+    local function isDoorName(n)
+        local l = n:lower()
+        if n:find("Door") or n:find("Gate") or l:find("%f[%a]door") or l:find("%f[%a]gate") then return true end
+        if n:find("ประตู", 1, true) then return true end
+        for _, kw in ipairs(DriveConfig.ExtraDoorKeywords) do
+            if l:find(kw:lower(), 1, true) then return true end
+        end
+        return false
+    end
+
+    local function scanDoors()
+        if os.clock() - Nav.doorScanT < 30 then return end
+        Nav.doorScanT = os.clock()
+        local map = Workspace:FindFirstChild("Map")
+        local root = (map and map:FindFirstChild("Tiles")) or Workspace
+        local vf = Workspace:FindFirstChild("Vehicles")
+        local list, seen = {}, {}
+        local function addPart(p)
+            if seen[p] or #list >= 600 then return end
+            if p:IsA("Terrain") then return end
+            if math.max(p.Size.X, p.Size.Y, p.Size.Z) >= 40 then return end
+            seen[p] = true
+            list[#list + 1] = p
+        end
+        for i, d in ipairs(root:GetDescendants()) do
+            if #list >= 600 then break end
+            if isDoorName(d.Name) and not (vf and d:IsDescendantOf(vf)) then
+                if d:IsA("BasePart") then addPart(d)
+                else for _, c in ipairs(d:GetDescendants()) do if c:IsA("BasePart") then addPart(c) end end end
+            end
+            if i % 20000 == 0 then task.wait() end
+        end
+        Nav.doors = list
+    end
+
+    local function navSetup(vehicle)
+        local ignore = { vehicle }
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl.Character then table.insert(ignore, pl.Character) end
+        end
+        rayParams2.FilterDescendantsInstances = ignore
+        local ex = table.clone(ignore)
+        if DriveConfig.ThroughDoors then
+            scanDoors()
+            for _, d in ipairs(Nav.doors) do ex[#ex + 1] = d end
+        end
+        Nav.overlap.FilterDescendantsInstances = ex
+        Nav.R = math.clamp(math.max(V.W * 0.5, V.L * 0.25) + DriveConfig.Clearance, 1.5, 6)
+    end
+
+    local function floorAt(x, z, refY)
+        if DriveConfig.UndergroundMode then return DriveConfig.UndergroundY end
+        local up = DriveConfig.MaxStep + 1.2
+        local r = Workspace:Raycast(Vector3.new(x, refY + up, z), Vector3.new(0, -(up + DriveConfig.MaxDropCell), 0), rayParams2)
+        if r and r.Normal.Y >= 0.55 then return r.Position.Y end
+        return nil
+    end
+
+    local function volumeFree(x, z, floorY)
+        local R = Nav.R
+        if DriveConfig.UndergroundMode then
+            local yLow, yHigh = DriveConfig.UndergroundY - 1, DriveConfig.UndergroundY + math.max(V.H, 6)
+            local hBox = yHigh - yLow
+            local cf = CFrame.new(x, yLow + hBox * 0.5, z)
+            local parts = Workspace:GetPartBoundsInBox(cf, Vector3.new(R * 2, hBox, R * 2), Nav.overlap)
+            return #parts == 0
+        end
+        local yLow, yHigh = floorY + DriveConfig.MaxStep, floorY + math.max(V.H, DriveConfig.MaxStep + 1.5)
+        local hBox = yHigh - yLow
+        local cf = CFrame.new(x, yLow + hBox * 0.5, z)
+        local parts = Workspace:GetPartBoundsInBox(cf, Vector3.new(R * 2, hBox, R * 2), Nav.overlap)
+        if #parts == 0 then return true end
+        local big = {}
+        for _, p in ipairs(parts) do
+            local sz = p.Size
+            if math.max(sz.X, sz.Y, sz.Z) < 6 then return false end
+            big[#big + 1] = p
+        end
+        Nav.inc.FilterDescendantsInstances = big
+        local levels = { yLow + 0.3, yHigh - 0.3 }
+        for _, y in ipairs(levels) do
+            for i = 0, 7 do
+                local a = i * (math.pi / 4)
+                local dx, dz = math.cos(a), math.sin(a)
+                if Workspace:Raycast(Vector3.new(x, y, z), Vector3.new(dx * R, 0, dz * R), Nav.inc) then return false end
+                if Workspace:Raycast(Vector3.new(x + dx * R, y, z + dz * R), Vector3.new(-dx * R, 0, -dz * R), Nav.inc) then return false end
+            end
+        end
+        if Workspace:Raycast(Vector3.new(x, yHigh, z), Vector3.new(0, -hBox, 0), Nav.inc) then return false end
+        return true
+    end
+
+    local function getMyVehicle()
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local seat = hum and hum.SeatPart
+        if not seat then return nil end
+        local vf = Workspace:FindFirstChild("Vehicles")
+        if vf and seat:IsDescendantOf(vf) then
+            local cur = seat
+            while cur.Parent and cur.Parent ~= vf do cur = cur.Parent end
+            return cur
+        end
+        local best = seat:FindFirstAncestorOfClass("Model") or seat
+        if best == Workspace then return seat end
+        return best
+    end
+
+    local function localExtents(vehicle)
+        local inv = vehicle:GetPivot():Inverse()
+        local mn = Vector3.new(math.huge, math.huge, math.huge)
+        local mx = Vector3.new(-math.huge, -math.huge, -math.huge)
+        local function add(part)
+            if part.Transparency >= 1 and not part.CanCollide then return end
+            local cf = inv * part.CFrame
+            local hs = part.Size * 0.5
+            local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
+            local ex = math.abs(r00) * hs.X + math.abs(r01) * hs.Y + math.abs(r02) * hs.Z
+            local ey = math.abs(r10) * hs.X + math.abs(r11) * hs.Y + math.abs(r12) * hs.Z
+            local ez = math.abs(r20) * hs.X + math.abs(r21) * hs.Y + math.abs(r22) * hs.Z
+            mn = Vector3.new(math.min(mn.X, x - ex), math.min(mn.Y, y - ey), math.min(mn.Z, z - ez))
+            mx = Vector3.new(math.max(mx.X, x + ex), math.max(mx.Y, y + ey), math.max(mx.Z, z + ez))
+        end
+        if vehicle:IsA("BasePart") then add(vehicle) end
+        for _, d in ipairs(vehicle:GetDescendants()) do if d:IsA("BasePart") then add(d) end end
+        if mn.X == math.huge then return Vector3.new(4, 4, 6), nil end
+        return mx - mn, mn
+    end
+
+    local function prepareVehicle(vehicle)
+        local pivot = vehicle:GetPivot()
+        local ext, mnv = localExtents(vehicle)
+        V.L, V.W, V.H = math.max(ext.X, ext.Z), math.clamp(math.min(ext.X, ext.Z) + 0.5, 2, 10), math.clamp(ext.Y, 3, 14)
+        V.lean = math.min(ext.X, ext.Z) < 3.5
+        navSetup(vehicle)
+        if DriveConfig.UndergroundMode then
+            V.hover = 3
+        else
+            local g0 = Workspace:Raycast(pivot.Position + Vector3.new(0, 3, 0), Vector3.new(0, -300, 0), rayParams2)
+            local rayH = g0 and (pivot.Position.Y - g0.Position.Y) or nil
+            local geoH = (mnv and mnv.Y < -0.2) and -mnv.Y or nil
+            local h0 = (rayH and geoH) and math.min(rayH, geoH) or rayH or geoH or 3
+            V.hover = math.clamp(h0, 0.5, 14)
+        end
+        if yawByVehicle[vehicle] == nil then
+            local seat = getMyVehicle() == vehicle and player.Character.Humanoid.SeatPart
+            local f = seat and vehicle:GetPivot():VectorToObjectSpace(seat.CFrame.LookVector) or Vector3.new(0,0,-1)
+            yawByVehicle[vehicle] = math.floor(math.deg(math.atan2(f.X, -f.Z)) / 90 + 0.5) * 90 % 360
+        end
+        yawOffset = yawByVehicle[vehicle]
+        curVehicle = vehicle
+    end
+
+    local function collectATMs()
+        local list = {}
+        local map = Workspace:FindFirstChild("Map")
+        local props = map and map:FindFirstChild("Props")
+        local folder = props and props:FindFirstChild("ATMs")
+        if not folder then return list end
+        local function scan(parent)
+            for _, c in ipairs(parent:GetChildren()) do
+                if c:IsA("Model") or c:IsA("BasePart") then list[#list + 1] = c
+                elseif c:IsA("Folder") then scan(c) end
+            end
+        end
+        scan(folder)
+        return list
+    end
+
+    local function atmKey(a)
+        local p = a:GetPivot().Position
+        return ("%s@%d,%d"):format(a.Name, math.floor(p.X + 0.5), math.floor(p.Z + 0.5))
+    end
+
+    local function atmInfo(atm)
+        local cf, size = atm:IsA("Model") and atm:GetBoundingBox() or atm.CFrame, atm.Size
+        local center = cf.Position
+        local look = flatUnit(atm:GetPivot().LookVector) or Vector3.new(0, 0, -1)
+        local pref = frontMode and rotY(look, math.rad(frontMode))
+        if not pref then
+            for _, d in ipairs(atm:GetDescendants()) do
+                local pp = d:IsA("ProximityPrompt") and (d.Parent:IsA("BasePart") and d.Parent.Position or d.Parent:IsA("Attachment") and d.Parent.WorldPosition)
+                if not pp and d:IsA("BasePart") and (d.Name:lower():find("screen") or d.Name:lower():find("display")) then pp = d.Position end
+                if pp and flatDist(pp, center) > 0.4 then pref = flatUnit(pp - center) break end
+            end
+            pref = pref or look
+        end
+        return center, pref, math.max(size.X, size.Z) * 0.5, center.Y - size.Y * 0.5
+    end
+
+    local function computeStandGap() return DriveConfig.StandGap + math.max(0, V.L - 5) * 0.4 end
+
+    local function computeStand(atm, vehicle)
+        local saved = DriveState.standOverride[atmKey(atm)]
+        if DriveConfig.UndergroundMode then
+            if saved then return Vector3.new(saved.X, DriveConfig.UndergroundY, saved.Z) end
+            local center, pref, half = atmInfo(atm)
+            local baseDist = half + V.L * 0.5 + computeStandGap()
+            return Vector3.new(center.X + pref.X * baseDist, DriveConfig.UndergroundY, center.Z + pref.Z * baseDist)
+        end
+        if saved then return saved end
+        local center, pref, half, bottomY = atmInfo(atm)
+        local baseDist = half + V.L * 0.5 + computeStandGap()
+        local x, z = center.X + pref.X * baseDist, center.Z + pref.Z * baseDist
+        return Vector3.new(x, floorAt(x, z, bottomY) or bottomY, z)
+    end
+
+    local function planProfile(path, s0, startAlt)
+        local spacing = DriveConfig.ProfileSpacing
+        local remaining = path.len - s0
+        local total = math.min(math.clamp(100 + DriveConfig.Speed, 100, 280), remaining)
+        local n = math.max(1, math.ceil(total / spacing))
+        local endFloor = path.pts[#path.pts].Y
+        local flyTop = path.flyover and (math.max(startAlt, endFloor) + DriveConfig.ScanHeight) or nil
+        local s, hs, spos, sdir = {}, {}, {}, {}
+        local hv = hoverNow()
+        local lastH = startAlt - hv
+        for j = 0, n do
+            local d = math.min(j * spacing, total)
+            local p, tan = pathAt(path, s0 + d)
+            local topY = flyTop and (path.len - (s0 + d)) > 25 and flyTop or (path.flyover and endFloor + hv + scanUp() or lastH + hv + scanUp())
+            local r = Workspace:Raycast(Vector3.new(p.X, topY, p.Z), Vector3.new(0, -3000, 0), rayParams2)
+            local h = r and r.Position.Y or lastH
+            lastH = h
+            s[j + 1], hs[j + 1], spos[j + 1], sdir[j + 1] = d, h, p, tan
+        end
+        local count = n + 1
+        local need = table.create(count)
+        for k = 1, count do
+            local edge = k > 1 and k < count and math.abs(hs[k + 1] - 2 * hs[k] + hs[k - 1]) > 1.5
+            if k > 1 and math.abs(hs[k] - hs[k - 1]) > 3.5 then edge = true end
+            if k < count and math.abs(hs[k + 1] - hs[k]) > 3.5 then edge = true end
+            need[k] = hs[k] + hv + (edge and DriveConfig.Margin or 0)
+        end
+        local A = table.create(count)
+        A[count] = need[count]
+        for k = count - 1, 1, -1 do A[k] = math.max(need[k], A[k + 1] - (s[k + 1] - s[k]) * DriveConfig.ClimbSlope) end
+        local B = table.create(count)
+        B[1] = startAlt
+        for k = 2, count do B[k] = math.max(A[k], B[k - 1] - (s[k] - s[k - 1]) * DriveConfig.DescendSlope) end
+        local gpts = table.create(count)
+        for k = 1, count do gpts[k] = Vector3.new(spos[k].X, B[k], spos[k].Z) end
+        return s, B, gpts, sdir
+    end
+
+    local function altAt(s, B, d)
+        for k = 1, #s - 1 do
+            if d <= s[k + 1] then
+                local t = (d - s[k]) / math.max(s[k + 1] - s[k], 1e-4)
+                return B[k] + (B[k + 1] - B[k]) * math.clamp(t, 0, 1)
+            end
+        end
+        return B[#B]
+    end
+
+    local guideFolder = Instance.new("Folder")
+    guideFolder.Name = "AutoDriveGuide"
+    guideFolder.Parent = Workspace
+    local GUIDE_MAX = 48
+    local guideParts = {}
+    for i = 1, GUIDE_MAX do
+        local p = Instance.new("Part")
+        p.Anchored, p.CanCollide, p.CanTouch, p.CanQuery, p.CastShadow = true, false, false, false, false
+        p.Material, p.Color, p.Size, p.Transparency = Enum.Material.Neon, DriveConfig.GuideColor, Vector3.new(0.45, 0.45, 1), 1
+        p.Parent = guideFolder
+        guideParts[i] = p
+    end
+
+    local marker = Instance.new("Part")
+    marker.Shape, marker.Size, marker.Anchored = Enum.PartType.Cylinder, Vector3.new(0.25, 9, 9), true
+    marker.CanCollide, marker.CanTouch, marker.CanQuery, marker.CastShadow = false, false, false, false
+    marker.Material, marker.Color, marker.Transparency = Enum.Material.Neon, Color3.fromRGB(80, 255, 120), 1
+    marker.Parent = guideFolder
+
+    local function showMarker(pos) marker.CFrame = CFrame.new(pos + Vector3.new(0, 0.2, 0)) * CFrame.Angles(0, 0, math.rad(90)) marker.Transparency = 0.45 end
+    local function hideMarker() marker.Transparency = 1 end
+    local function hideGuide() for _, p in ipairs(guideParts) do p.Transparency = 1 end end
+    local function updateGuide(carPos)
+        local pts, dirs = DriveState.guidePts, DriveState.guideDirs
+        if not guideEnabled or not pts or #pts == 0 then hideGuide() return end
+        local line, started = { carPos }, false
+        for k = 1, #pts do
+            if not started then
+                local d = dirs[k]
+                if (pts[k].X - carPos.X) * d.X + (pts[k].Z - carPos.Z) * d.Z > 1.5 then started = true end
+            end
+            if started then
+                line[#line + 1] = pts[k]
+                if #line >= GUIDE_MAX + 1 then break end
+            end
+        end
+        for i = 1, GUIDE_MAX do
+            local a, b = line[i], line[i + 1]
+            local part = guideParts[i]
+            if a and b and (b - a).Magnitude > 0.01 then
+                part.Size = Vector3.new(0.45, 0.45, (b - a).Magnitude + 0.1)
+                part.CFrame = CFrame.lookAt((a + b) / 2, b)
+                part.Transparency = math.clamp((i - 1) / #line * 0.85, 0, 0.85)
+            else part.Transparency = 1 end
+        end
+    end
+
+    local function isAlive()
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        return hum ~= nil and hum.Health > 0
+    end
+    local function getSeat()
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        return hum and hum.SeatPart
+    end
+    local function isSeatedIn(vehicle)
+        local seat = getSeat()
+        return seat ~= nil and (seat == vehicle or seat:IsDescendantOf(vehicle))
+    end
+
+    local function collectRoots(model)
+        local seen, list = {}, {}
+        local function add(p)
+            local r = p.AssemblyRootPart
+            if r and not seen[r] then seen[r] = true list[#list + 1] = r end
+        end
+        if model:IsA("BasePart") then add(model) end
+        for _, d in ipairs(model:GetDescendants()) do if d:IsA("BasePart") then add(d) end end
+        return list
+    end
+
+    local function pathAt(path, s)
+        s = math.clamp(s, 0, path.len)
+        local pts, cum = path.pts, path.cum
+        local i = path.base
+        if cum[i] > s then i = 1 end
+        while i < #pts - 1 and cum[i + 1] < s do i += 1 end
+        local a, b = pts[i], pts[i + 1]
+        local segLen = cum[i + 1] - cum[i]
+        local t = segLen > 1e-6 and (s - cum[i]) / segLen or 0
+        return a:Lerp(b, t), flatUnit(b - a) or Vector3.new(0, 0, -1)
+    end
+
+    local function advanceBase(path, s)
+        local cum = path.cum
+        while path.base < #path.pts - 1 and cum[path.base + 1] < s do path.base += 1 end
+    end
+
+    local function driveRoute(vehicle, myId, path, label)
+        local pivot = vehicle:GetPivot()
+        local planS, planAlt = 0, pivot.Position.Y
+        local _, t0 = pathAt(path, 0)
+        local heading = flatUnit((pivot * CFrame.Angles(0, -math.rad(yawOffset), 0)).LookVector) or t0
+        local pitchS, leanS, result, tween, unseatedAt, lastStream = 0, 0, "stopped", nil, nil, 0
+        local endY = path.pts[#path.pts].Y
+        local cfv = Instance.new("CFrameValue")
+        cfv.Value = pivot
+        local roots = collectRoots(vehicle)
+        local conn = cfv.Changed:Connect(function(v)
+            vehicle:PivotTo(v)
+            for _, r in ipairs(roots) do r.AssemblyLinearVelocity, r.AssemblyAngularVelocity = Vector3.zero, Vector3.zero end
+        end)
+        local function cleanup() if tween then tween:Cancel() end conn:Disconnect() end
+        DriveState.cleanup = cleanup
+
+        while DriveState.running and DriveState.runId == myId do
+            if DriveState.skip then DriveState.skip = false result = "skipped" break end
+            if not vehicle.Parent or not isAlive() then result = "lost" break end
+            local now = os.clock()
+            if isSeatedIn(vehicle) then unseatedAt = nil else
+                unseatedAt = unseatedAt or now
+                if now - unseatedAt > 1.5 then result = "unseated" break end
+            end
+            if (vehicle:GetPivot().Position - cfv.Value.Position).Magnitude > 20 then result = "replan" break end
+            local dt, remaining = DriveConfig.StepTime, path.len - planS
+            if remaining <= 1 then result = "arrived" break end
+            local curveAng = 0
+            if not path.flyover then
+                local _, t1 = pathAt(path, planS)
+                local _, t2 = pathAt(path, math.min(planS + 14, path.len))
+                curveAng = math.abs(signedAngle(t1, t2))
+            end
+            local speedMul = math.clamp(1 - curveAng / math.rad(100), 0.35, 1)
+            local slow = math.clamp(remaining / 25, 0.3, 1)
+            local effSpeed = math.max(DriveConfig.Speed * speedMul * slow, 4)
+            local stepDist = math.min(effSpeed * dt, remaining)
+            local nextS = planS + stepDist
+            local np = pathAt(path, nextS)
+            local _, aheadTan = pathAt(path, math.min(nextS + 3, path.len))
+            local newHeading = turnToward(heading, aheadTan, DriveConfig.TurnRate * dt)
+            local nextAlt, gpts, gdirs, groundN
+            if DriveConfig.UndergroundMode then
+                nextAlt, groundN = DriveConfig.UndergroundY, DriveConfig.UndergroundY
+                gpts, gdirs = {}, {}
+                for d = 0, 96, 6 do
+                    local p, t = pathAt(path, math.min(planS + d, path.len))
+                    gpts[#gpts + 1], gdirs[#gdirs + 1] = Vector3.new(p.X, DriveConfig.UndergroundY, p.Z), t
+                end
+            else
+                local s, B, gpts2, gdirs2 = planProfile(path, planS, planAlt)
+                nextAlt = altAt(s, B, stepDist)
+                gpts, gdirs = gpts2, gdirs2
+                local topY = path.flyover and (remaining > 25 and (math.max(planAlt, endY) + DriveConfig.ScanHeight) or (endY + hoverNow() + scanUp())) or (math.max(planAlt, nextAlt) + scanUp())
+                local gr = Workspace:Raycast(Vector3.new(np.X, topY, np.Z), Vector3.new(0, -3000, 0), rayParams2)
+                groundN = gr and gr.Position.Y or (nextAlt - hoverNow())
+                nextAlt = math.max(nextAlt, groundN + hoverNow())
+            end
+            if stepDist > 0.3 and not DriveConfig.UndergroundMode then
+                pitchS = pitchS + (math.clamp(math.atan2(nextAlt - planAlt, stepDist), -0.8, 0.8) - pitchS) * 0.4
+            elseif DriveConfig.UndergroundMode then pitchS = 0 end
+            local leanT = V.lean and math.clamp(signedAngle(heading, newHeading) / dt * 0.12, -0.4, 0.4) or 0
+            leanS = leanS + (leanT - leanS) * 0.3
+            local nextPos = Vector3.new(np.X, nextAlt, np.Z)
+            local fwd = Vector3.new(newHeading.X * math.cos(pitchS), math.sin(pitchS), newHeading.Z * math.cos(pitchS))
+            local newCF = CFrame.lookAt(nextPos, nextPos + fwd) * CFrame.Angles(0, 0, leanS) * CFrame.Angles(0, math.rad(yawOffset), 0)
+            DriveState.guidePts, DriveState.guideDirs = gpts, gdirs
+            if DriveConfig.UndergroundMode then setATMStatus("🚇 ใต้ดิน → " .. label) else setATMStatus("🏍️ กำลังไป → " .. label) end
+            local T = math.max((nextPos - cfv.Value.Position).Magnitude / effSpeed, 0.04)
+            if tween then tween:Cancel() end
+            tween = TweenService:Create(cfv, TweenInfo.new(T, Enum.EasingStyle.Linear), { Value = newCF })
+            tween:Play()
+            planS, planAlt, heading = nextS, nextAlt, newHeading
+            advanceBase(path, planS)
+            task.wait(math.max(T - 0.05, 0.02))
+        end
+        if result == "arrived" and tween and tween.PlaybackState == Enum.PlaybackState.Playing then tween.Completed:Wait() end
+        local finalCF = cfv.Value
+        cleanup()
+        cfv:Destroy()
+        if DriveState.cleanup == cleanup then DriveState.cleanup = nil end
+        return result, finalCF
+    end
+
+    local function runSync(fn)
+        DriveState.running = true
+        DriveState.runId += 1
+        local myId = DriveState.runId
+        DriveState.skip = false
+        local ok, res = pcall(fn, myId)
+        if DriveState.runId == myId then
+            DriveState.running = false
+            if DriveState.cleanup then local c = DriveState.cleanup DriveState.cleanup = nil pcall(c) end
+            DriveState.guidePts, DriveState.guideDirs = nil, nil
+            hideGuide() hideMarker()
+        end
+        if not ok then return "error" end
+        return res
+    end
+
+    function Drive.goToATM(vehicle, atm)
+        return runSync(function(myId)
+            prepareVehicle(vehicle)
+            local stand = computeStand(atm, vehicle)
+            showMarker(stand)
+            local from = Vector3.new(vehicle:GetPivot().Position.X, DriveConfig.UndergroundMode and DriveConfig.UndergroundY or floorAt(vehicle:GetPivot().Position.X, vehicle:GetPivot().Position.Z, vehicle:GetPivot().Position.Y), vehicle:GetPivot().Position.Z)
+            local to = Vector3.new(stand.X, DriveConfig.UndergroundMode and DriveConfig.UndergroundY or stand.Y, stand.Z)
+            local path = { pts = { from, to }, cum = { 0, (to - from).Magnitude }, len = (to - from).Magnitude, base = 1 }
+            local result, finalCF = driveRoute(vehicle, myId, path, atm.Name)
+            if result == "arrived" then
+                local t0 = os.clock()
+                while DriveState.running and DriveState.runId == myId and os.clock() - t0 < DriveConfig.DwellTime do vehicle:PivotTo(finalCF) task.wait() end
+                hideMarker() return "arrived"
+            end
+            hideMarker() return result
+        end)
+    end
+
+    function Drive.stop()
+        DriveState.running = false
+        DriveState.runId += 1
+        if DriveState.cleanup then local c = DriveState.cleanup DriveState.cleanup = nil pcall(c) end
+        DriveState.guidePts, DriveState.guideDirs = nil, nil
+        hideGuide() hideMarker()
+    end
+
+    function Drive.collectATMs() return collectATMs() end
+    function Drive.atmKey(atm) return atmKey(atm) end
+    function Drive.flatDist(a, b) return flatDist(a, b) end
+    function Drive.setUnderground(enabled, y)
+        if y then DriveConfig.UndergroundY = tonumber(y) or DriveConfig.UndergroundY end
+        DriveConfig.UndergroundMode = enabled and true or false
+    end
+    Drive.CONFIG = DriveConfig
+end
+
+local Hack = {}
+do
+    _G.AtmHack_Active = false
+    local lastLevel = 0
+    pcall(function()
+        Slider.needle_pos.hook(function(pos)
+            if not _G.AtmHack_Active or Slider.enabled.get() ~= true then return end
+            local size, tpos, lvl = Slider.target_size.get(), Slider.target_pos.get(), Slider.level.get()
+            if lvl == lastLevel then return end
+            local half = size / 2
+            if pos >= tpos - (half + 0.03) and pos <= tpos + (half + 0.03) then
+                lastLevel = lvl
+                task.spawn(function()
+                    task.wait(math.random(1, 2) / 100)
+                    local env = getfenv(Keybinds.hook_action)
+                    local list = env and env.hooked_functions and env.hooked_functions["minigame_click"]
+                    if type(list) == "table" then
+                        for _, o in pairs(list) do if o.func then task.spawn(o.func, true, Enum.UserInputState.Begin) end end
+                    end
+                end)
+            end
+        end)
+    end)
+
+    local function FindNearestATM()
+        local folder = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Props") and Workspace.Map.Props:FindFirstChild("ATMs")
+        if not folder then return nil end
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return nil end
+        local best, bd = nil, math.huge
+        for _, atm in ipairs(folder:GetChildren()) do
+            local p = atm:IsA("BasePart") and atm.Position or atm:FindFirstChildWhichIsA("BasePart") and atm:FindFirstChildWhichIsA("BasePart").Position
+            if p then
+                local d = (p - hrp.Position).Magnitude
+                if d < bd then bd, best = d, atm end
+            end
+        end
+        return best
+    end
+
+    function Hack.run(chipName, atmOverride)
+        chipName = chipName or "HackToolBasic"
+        if not Slider then return false end
+        local atm = atmOverride or FindNearestATM()
+        if not atm then return false end
+        local atmPos = atm:IsA("BasePart") and atm.Position or atm:FindFirstChildWhichIsA("BasePart").Position
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp or not atmPos then return false end
+        local pinHack
+        if ATMCfg.UndergroundMode then
+            local pinCF = CFrame.new(atmPos.X, ATMCfg.HackY or 252, atmPos.Z)
+            hrp.CFrame = pinCF
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.3)
+            pinHack = RunService.Heartbeat:Connect(function()
+                if not _G.AtmHack_Active then return end
+                if hrp and hrp.Parent then hrp.CFrame = pinCF hrp.AssemblyLinearVelocity = Vector3.zero end
+            end)
+        end
+        _G.AtmHack_Active = true
+        lastLevel = 0
+        NetSend("request_begin_hacking_3", atm, chipName)
+        local tStart, seen = tick(), false
+        while tick() - tStart < 25 do
+            if Slider.enabled.get() == true then seen = true
+            elseif seen then break
+            elseif (tick() - tStart) > 5 and not seen then break end
+            task.wait(0.2)
+        end
+        if pinHack then pinHack:Disconnect() end
+        _G.AtmHack_Active = false
+        return seen
+    end
+end
+
+local Bank = {}
+function Bank.withdraw(amount) return callGet("transfer_funds", "bank", "hand", amount) end
+function Bank.deposit(amount) return callGet("transfer_funds", "hand", "bank", amount) end
+function Bank.buy(chip, qty, shop)
+    local okCount = 0
+    for i = 1, qty do
+        if not isATMAlive() then break end
+        say(("ซื้อ %s %d/%d"):format(chip, i, qty))
+        if callGet("purchase_consumable", shop, chip) then okCount += 1 else break end
+        task.wait(0.4)
+    end
+    return okCount
+end
+
+local charPinConn = nil
+local function pinChar(pos)
+    if charPinConn then charPinConn:Disconnect() charPinConn = nil end
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local cf = CFrame.new(pos)
+    hrp.CFrame = cf
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    charPinConn = RunService.Heartbeat:Connect(function()
+        if hrp and hrp.Parent then hrp.CFrame = cf hrp.AssemblyLinearVelocity = Vector3.zero end
+    end)
+end
+local function unpinChar() if charPinConn then charPinConn:Disconnect() charPinConn = nil end end
+
+local stats = { hacks = 0 }
+local badUntil = {}
+local buyFails = 0
+local mainToggle, syncing = nil, false
+
+local function stopATMAll(msg)
+    local was = ATMCfg.Active
+    ATMCfg.Active, ATMCfg.Manual = false, false
+    unpinChar()
+    Drive.stop()
+    _G.AtmHack_Active = false
+    if msg then
+        say(msg)
+        pcall(function() WindUI:Notify({ Title = "Auto ATM Hub", Content = msg, Duration = 6 }) end)
+    end
+    if was and mainToggle then
+        syncing = true
+        pcall(function() mainToggle:Set(false) end)
+        syncing = false
+    end
+end
+
+local function myPos()
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    return hrp and hrp.Position or Vector3.zero
+end
+
+local function atmReadyLive(atm)
+    local ready = false
+    local part = atm:FindFirstChild("Part")
+    local pr = part and part:FindFirstChild("ProximityPrompt")
+    if pr and pr:IsA("ProximityPrompt") then ready = pr.Enabled end
+    if not ready then local fb = atm:FindFirstChildWhichIsA("ProximityPrompt", true) if fb then ready = fb.Enabled end end
+    return ready
+end
+
+local function isSeated()
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.SeatPart ~= nil
+end
+
+local readyCache = {}
+local function atmState(atm)
+    local key = Drive.atmKey(atm)
+    if not isSeated() then
+        local r = atmReadyLive(atm)
+        readyCache[key] = { ready = r, t = os.clock() }
+        return r
+    end
+    local c = readyCache[key]
+    if not c then return nil end
+    if not c.ready and os.clock() - c.t > 45 then return nil end
+    return c.ready
+end
+
+local badBankUntil = {}
+local function pickATM(fromPos, forHack)
+    local best, bd
+    local now = os.clock()
+    for _, a in ipairs(Drive.collectATMs()) do
+        local skip = false
+        local bk = badBankUntil[Drive.atmKey(a)]
+        if bk and bk > now then skip = true end
+        if not skip and forHack then
+            local bu = badUntil[Drive.atmKey(a)]
+            skip = (bu and bu > now) or atmState(a) == false
+        end
+        if not skip then
+            local d = Drive.flatDist(a:GetPivot().Position, fromPos)
+            if not bd or d < bd then best, bd = a, d end
+        end
+    end
+    return best
+end
+
+local function updateHighlights()
+    for _, atm in ipairs(Drive.collectATMs()) do
+        local h = atm:FindFirstChild("PromptStatusHighlight")
+        if not h then h = Instance.new("Highlight") h.Name = "PromptStatusHighlight" h.Adornee = atm h.Parent = atm end
+        local st = atmState(atm)
+        h.FillColor = (st == true and Color3.fromRGB(0, 255, 0)) or (st == false and Color3.fromRGB(255, 0, 0)) or Color3.fromRGB(255, 170, 0)
+        h.OutlineColor, h.FillTransparency = Color3.fromRGB(255, 255, 255), 0.5
+    end
+end
+local function clearHighlights()
+    for _, atm in ipairs(Drive.collectATMs()) do
+        local h = atm:FindFirstChild("PromptStatusHighlight")
+        if h then h:Destroy() end
+    end
+end
+
+local function exitSeat()
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or not hum.SeatPart then return true end
+    say("ลงจากรถ...")
+    NetGet("exit_seat")
+    for _ = 1, 10 do if not hum.SeatPart then return true end task.wait(0.1) end
+    pcall(function() hum.Sit = false hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+    task.wait(0.3)
+    return hum.SeatPart == nil
+end
+
+local function driveTo(fn)
+    unpinChar()
+    for _ = 1, 3 do
+        if not isATMAlive() then return false end
+        if not Veh.ensureSeated() then return false end
+        local vehicle = Drive.getMyVehicle()
+        if vehicle then
+            if ATMCfg.UndergroundMode then Drive.warpVehicleY(vehicle, ATMCfg.UndergroundY) task.wait(0.25) end
+            local res = fn(vehicle)
+            if res == "arrived" or res == "skipped" then return true end
+            if res == "stopped" then return false end
+        end
+        task.wait(1)
+    end
+    return false
+end
+
+local function visitATM(atm)
+    say("ขับไป " .. atm.Name)
+    if not driveTo(function(v) return Drive.goToATM(v, atm) end) then return false end
+    if ATMCfg.UndergroundMode then
+        local vehicle = Drive.getMyVehicle()
+        if vehicle then
+            local curPivot = vehicle:GetPivot()
+            vehicle:PivotTo(CFrame.new(atm:GetPivot().Position.X, ATMCfg.HackY or 252, atm:GetPivot().Position.Z) * (curPivot - curPivot.Position))
+            task.wait(0.25)
+        end
+    end
+    exitSeat()
+    if ATMCfg.UndergroundMode then
+        pinChar(Vector3.new(atm:GetPivot().Position.X, ATMCfg.HackY or 252, atm:GetPivot().Position.Z))
+        task.wait(0.15)
+    end
+    return true
+end
+
+local function hackAt(atm)
+    if not isATMAlive() then return end
+    say("กำลังแฮก " .. atm.Name .. " ด้วย " .. ATMCfg.Chip)
+    local seen = Hack.run(ATMCfg.Chip, atm)
+    badUntil[Drive.atmKey(atm)] = os.clock() + (seen and 5 or 20)
+    readyCache[Drive.atmKey(atm)] = { ready = false, t = os.clock() }
+    if seen then stats.hacks += 1 say("แฮกเสร็จ (รวม " .. stats.hacks .. " ครั้ง)") else say("แฮกไม่สำเร็จ") end
+end
+
+local function tryWithdrawAnywhere(amount, fromPos, maxTries)
+    maxTries = maxTries or 5
+    local list = Drive.collectATMs()
+    table.sort(list, function(a, b) return Drive.flatDist(a:GetPivot().Position, fromPos) < Drive.flatDist(b:GetPivot().Position, fromPos) end)
+    local tried = 0
+    for _, atm in ipairs(list) do
+        if not isATMAlive() then return false end
+        local key = Drive.atmKey(atm)
+        local bu = badBankUntil[key]
+        if not (bu and bu > os.clock()) then
+            tried += 1
+            if visitATM(atm) then
+                task.wait(0.3)
+                if Bank.withdraw(amount) then return true end
+                badBankUntil[key] = os.clock() + 30
+            else badBankUntil[key] = os.clock() + 15 end
+            unpinChar()
+            if not Veh.ensureSeated() then return false end
+            if ATMCfg.UndergroundMode then Drive.warpToUnderground() end
+            if tried >= maxTries then break end
+        end
+    end
+    return false
+end
+
+local function tryDepositAnywhere(amount, fromPos, maxTries)
+    maxTries = maxTries or 4
+    local list = Drive.collectATMs()
+    table.sort(list, function(a, b) return Drive.flatDist(a:GetPivot().Position, fromPos) < Drive.flatDist(b:GetPivot().Position, fromPos) end)
+    local tried = 0
+    for _, atm in ipairs(list) do
+        if not isATMAlive() then return false end
+        local key = Drive.atmKey(atm)
+        local bu = badBankUntil[key]
+        if not (bu and bu > os.clock()) then
+            tried += 1
+            if visitATM(atm) then
+                task.wait(0.2)
+                if Bank.deposit(amount) then return true, atm end
+                badBankUntil[key] = os.clock() + 30
+            else badBankUntil[key] = os.clock() + 15 end
+            unpinChar()
+            if not Veh.ensureSeated() then return false end
+            if ATMCfg.UndergroundMode then Drive.warpToUnderground() end
+            if tried >= maxTries then break end
+        end
+    end
+    return false
+end
+
+local function cycle()
+    unpinChar()
+    if not Veh.ensureSeated() then task.wait(1.5) return end
+    if ATMCfg.UndergroundMode then Drive.warpToUnderground() end
+    local chip = ATMCfg.Chip
+    if countItem(chip) <= 0 then
+        local qty = math.max(1, math.floor(ATMCfg.BuyQty))
+        local cost = (CHIP_PRICE[chip] or 0) * qty
+        local hand, bank = getMoney()
+        if hand + bank < cost then stopATMAll(("เงินรวมไม่พอซื้อ %s ×%d"):format(chip, qty)) return end
+        if hand < cost then
+            if not tryWithdrawAnywhere(math.ceil(cost - hand), myPos(), 5) then stopATMAll("ถอนเงินไม่สำเร็จ") return end
+            task.wait(0.5) unpinChar()
+            if not Veh.ensureSeated() then return end
+            if ATMCfg.UndergroundMode then Drive.warpToUnderground() end
+        end
+        if not driveTo(function(v) return Drive.goToPoint(v, ATMCfg.ShopPoint, "จุดซื้อชิป") end) then return end
+        if ATMCfg.UndergroundMode then
+            local vehicle = Drive.getMyVehicle()
+            if vehicle then vehicle:PivotTo(CFrame.new(ATMCfg.ShopPoint.X, ATMCfg.ShopWarpY or 252, ATMCfg.ShopPoint.Z) * (vehicle:GetPivot() - vehicle:GetPivot().Position)) task.wait(0.25) end
+        end
+        exitSeat()
+        if ATMCfg.UndergroundMode then pinChar(Vector3.new(ATMCfg.ShopPoint.X, ATMCfg.ShopWarpY or 252, ATMCfg.ShopPoint.Z)) task.wait(0.15) end
+        local shop = Workspace:FindFirstChild("ShopZone_Illegal")
+        if not shop then unpinChar() stopATMAll("ไม่พบร้านค้า") return end
+        local got = Bank.buy(chip, qty, shop)
+        unpinChar()
+        if got <= 0 then buyFails += 1 if buyFails >= 2 then stopATMAll("ซื้อชิปไม่ผ่าน 2 ครั้ง") end return end
+        buyFails = 0
+        local leftover = math.floor((getMoney()) - ATMCfg.KeepOnHand)
+        if ATMCfg.AutoDeposit and leftover > 0 then
+            local ok, usedATM = tryDepositAnywhere(leftover, myPos(), 4)
+            if ok then
+                task.wait(0.5)
+                if usedATM and atmReadyLive(usedATM) then hackAt(usedATM) return end
+                unpinChar()
+                if not Veh.ensureSeated() then return end
+                if ATMCfg.UndergroundMode then Drive.warpToUnderground() end
+            end
+        end
+    end
+    if not isATMAlive() then return end
+    local atm = pickATM(myPos(), true)
+    if not atm then task.wait(2) return end
+    if not visitATM(atm) then return end
+    local ok = false
+    local t0 = os.clock()
+    while os.clock() - t0 < 2.5 do if atmReadyLive(atm) then ok = true break end task.wait(0.15) end
+    if not ok then
+        badUntil[Drive.atmKey(atm)] = os.clock() + 10
+        readyCache[Drive.atmKey(atm)] = { ready = false, t = os.clock() }
+        unpinChar() return
+    end
+    hackAt(atm)
+end
+
+local function startATMLoop()
+    if ATMCfg.Active then return end
+    ATMCfg.Manual = false
+    ATMCfg.Active = true
+    buyFails = 0
+    task.spawn(function()
+        while ATMCfg.Active and not ATMCfg.Destroyed do
+            pcall(cycle)
+            task.wait(0.3)
+        end
+        unpinChar()
+        Drive.stop()
+    end)
+end
+
+------------------------------------------------------------
+-- 3. UI CREATION
+------------------------------------------------------------
+local Window = WindUI:CreateWindow({
+    Title = "🎄 AUTO FARM & ATM HUB",
+    Author = "Combined Mode",
+    Icon = "bot",
+    Folder = "AutoFarmATMHub",
+    Theme = "Dark",
+    Size = UDim2.fromOffset(520, 480),
+})
+
+local function makeLive(tab, title, initial)
+    local obj
+    pcall(function() obj = tab:Paragraph({ Title = title, Desc = initial }) end)
+    if obj and obj.SetDesc then return function(text) pcall(obj.SetDesc, obj, text) end end
+    return function() end
+end
+
+local TabFarm = Window:Tab({ Title = "ฟาร์มกล่อง", Icon = "play" })
+local TabATM  = Window:Tab({ Title = "ฟาร์ม ATM", Icon = "banknote" })
+local TabY    = Window:Tab({ Title = "ตั้งค่า Y", Icon = "settings" })
+local TabDep  = Window:Tab({ Title = "ฝากเงิน", Icon = "wallet" })
+
+-- ===== TAB FARM =====
+local setFStatusUI = makeLive(TabFarm, "📊 สถานะ", "พร้อม")
+local setFStepUI   = makeLive(TabFarm, "🧭 ขั้นตอน", "-")
+TabFarm:Divider()
+
+TabFarm:Toggle({
+    Title = "▶ เริ่มฟาร์มกล่องอัตโนมัติ",
+    Desc = "P1 -> P2 -> สมัครงาน -> โซนรับกล่อง -> วางชั้น วนไป",
+    Value = false,
+    Callback = function(v)
+        if v then
+            FarmState.auto = true
+            startFarmRun(mainFlow)
+        else
+            FarmState.auto = false
+            stopFarmRun("หยุดแล้ว")
+        end
+    end,
+})
+TabFarm:Slider({
+    Title = "ความเร็วเดิน (studs/s)",
+    Step = 1,
+    Value = { Min = FarmConfig.MinSpeed, Max = FarmConfig.MaxSpeed, Default = FarmConfig.Speed },
+    Callback = function(v) FarmConfig.Speed = v end,
+})
+TabFarm:Toggle({
+    Title = "ทะลุกำแพงในร้าน (Tween ตรง)",
+    Value = true,
+    Callback = function(v) FarmState.noclipAll = v end,
+})
+TabFarm:Toggle({
+    Title = "🎄 เส้นนำทางคริสต์มาส",
+    Value = true,
+    Callback = function(v) FarmState.guide = v end,
+})
+TabFarm:Toggle({
+    Title = "🦘 โหมดโหด: Tween ข้ามรั้ว + A*",
+    Value = true,
+    Callback = function(v) FarmConfig.Hurdle = v end,
+})
+TabFarm:Slider({
+    Title = "ความสูงที่ข้ามได้ (studs)",
+    Step = 1,
+    Value = { Min = 3, Max = 30, Default = FarmConfig.MaxHurdle },
+    Callback = function(v) FarmConfig.MaxHurdle = v end,
+})
+TabFarm:Toggle({
+    Title = "💥 หาทางไม่ได้ -> Tween ทะลุตรง",
+    Value = true,
+    Callback = function(v) FarmState.brute = v end,
+})
+TabFarm:Toggle({
+    Title = "🛟 ปลดล็อกอัตโนมัติ (ติดแล้ว Tween ไปข้างหน้า)",
+    Value = true,
+    Callback = function(v) FarmState.unstick = v end,
+})
+TabFarm:Slider({
+    Title = "ยืนนิ่งกี่วินาทีถึงถือว่าติด",
+    Step = 1,
+    Value = { Min = 2, Max = 10, Default = FarmConfig.StuckTime },
+    Callback = function(v) FarmConfig.StuckTime = v end,
+})
+TabFarm:Slider({
+    Title = "กดกล่องรัว (ครั้ง/รอบ)",
+    Step = 1,
+    Value = { Min = 1, Max = 15, Default = FarmConfig.SpamBurst },
+    Callback = function(v) FarmConfig.SpamBurst = v end,
+})
+
+-- ===== TAB ATM =====
+local setATMStatusUI = makeLive(TabATM, "สถานะ ATM", "พร้อม")
+local setATMMoneyUI  = makeLive(TabATM, "กระเป๋า / ธนาคาร", "...")
+TabATM:Divider()
+
+mainToggle = TabATM:Toggle({
+    Title = "เริ่มระบบ ATM อัตโนมัติ",
+    Desc = "ใต้ดิน Y=240.5 → ATM/ร้าน วาปขึ้น Y=252 → วนซ้ำ",
+    Value = false,
+    Callback = function(on)
+        if syncing then return end
+        if on then startATMLoop() else stopATMAll("หยุดแล้ว") end
+    end,
+})
+TabATM:Space()
+TabATM:Dropdown({
+    Title = "พาหนะ",
+    Values = { "car", "bike" },
+    Value = ATMCfg.VehicleType,
+    Callback = function(v)
+        if v == "car" or v == "bike" then
+            ATMCfg.VehicleType = v
+            Veh.reset()
+        end
+    end,
+})
+TabATM:Dropdown({
+    Title = "ชิปที่ใช้แฮก",
+    Values = CHIP_LIST,
+    Value = ATMCfg.Chip,
+    Callback = function(v) if CHIP_PRICE[v] then ATMCfg.Chip = v end end,
+})
+TabATM:Slider({
+    Title = "ซื้อชิปต่อรอบ (ชิ้น)",
+    Step = 1,
+    Value = { Min = 1, Max = 50, Default = ATMCfg.BuyQty },
+    Callback = function(v) ATMCfg.BuyQty = math.floor(v) end,
+})
+TabATM:Toggle({
+    Title = "ฝากเงินที่เหลือหลังซื้อ",
+    Value = ATMCfg.AutoDeposit,
+    Callback = function(v) ATMCfg.AutoDeposit = v end,
+})
+TabATM:Slider({
+    Title = "เงินที่เก็บไว้ในตัว ($)",
+    Step = 10,
+    Value = { Min = 0, Max = 5000, Default = ATMCfg.KeepOnHand },
+    Callback = function(v) ATMCfg.KeepOnHand = math.floor(v) end,
+})
+TabATM:Toggle({
+    Title = "ซ่อมพาหนะอัตโนมัติเมื่อ HP = 0",
+    Value = ATMCfg.AutoRepair,
+    Callback = function(v) ATMCfg.AutoRepair = v end,
+})
+TabATM:Toggle({
+    Title = "ไฮไลต์ตู้ ATM",
+    Value = ATMCfg.HighlightATM,
+    Callback = function(v)
+        ATMCfg.HighlightATM = v
+        if not v then pcall(clearHighlights) end
+    end,
+})
+
+-- ===== TAB Y SETTINGS =====
+TabY:Slider({
+    Title = "Y เดินทางใต้ดิน (ค่าเริ่มต้น)",
+    Step = 0.5,
+    Value = { Min = 0, Max = 800, Default = ATMCfg.UndergroundY },
+    Callback = function(v)
+        ATMCfg.UndergroundY = v
+        Drive.CONFIG.UndergroundY = v
+        if ATMCfg.UndergroundMode then Drive.setUnderground(true, v) end
+    end,
+})
+TabY:Slider({
+    Title = "Y แฮก ATM (ใต้ตู้)",
+    Step = 0.5,
+    Value = { Min = 0, Max = 800, Default = ATMCfg.HackY },
+    Callback = function(v) ATMCfg.HackY = v end,
+})
+TabY:Slider({
+    Title = "Y ซื้อของ (ใต้ร้าน)",
+    Step = 0.5,
+    Value = { Min = 0, Max = 800, Default = ATMCfg.ShopWarpY },
+    Callback = function(v) ATMCfg.ShopWarpY = v end,
+})
+TabY:Slider({
+    Title = "Y บนดิน (fallback)",
+    Step = 0.5,
+    Value = { Min = 0, Max = 800, Default = ATMCfg.GroundYFallback },
+    Callback = function(v) Drive.CONFIG.GroundYFallback = v end,
+})
+
+-- ===== TAB DEPOSIT =====
+local setHandUI = makeLive(TabDep, "💵 เงินในมือ", "$0")
+local setBankUI = makeLive(TabDep, "🏧 ATM", "$0")
+TabDep:Divider()
+TabDep:Space()
+TabDep:Toggle({
+    Title = "🔄 ฝากเงินอัตโนมัติ (ที่ ATM)",
+    Desc = "ระหว่างฟาร์ม ถ้าเงินในมือถึงเกณฑ์ จะเดินไปฝากที่ ATM แล้วกลับมาฟาร์มต่อ",
+    Value = false,
+    Callback = function(v)
+        DepCfg.AutoOn = v
+        lastDepositTry = 0
+        lastResult = v and "🟢 เปิดระบบแล้ว" or "⏸ ปิดระบบ"
+    end,
+})
+TabDep:Dropdown({
+    Title = "โหมดฝาก",
+    Values = { modeLabel.all, modeLabel.excess },
+    Value = modeLabel.all,
+    Callback = function(v)
+        DepCfg.Mode = (v == modeLabel.excess) and "excess" or "all"
+        lastDepositTry = 0
+    end,
+})
+TabDep:Input({
+    Title = "💵 เกณฑ์เงินในมือ ($)",
+    Desc = "เช่น 500 -> เงินในมือถึง 500 ค่อยไปฝาก",
+    Value = tostring(DepCfg.Threshold),
+    Placeholder = "500",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 then DepCfg.Threshold = math.floor(n) end
+    end,
+})
+TabDep:Slider({
+    Title = "⏱ คูลดาวน์ระหว่างฝาก (วินาที)",
+    Step = 1,
+    Value = { Min = 1, Max = 60, Default = DepCfg.Cooldown },
+    Callback = function(v) DepCfg.Cooldown = v end,
+})
+TabDep:Space()
+TabDep:Button({
+    Title = "🏧 ไปฝากเดี๋ยวนี้ (ตามเกณฑ์)",
+    Callback = function()
+        if FarmState.running then
+            FarmState.depositNow = true
+            lastResult = "⏳ จะฝากหลังจบขั้นตอนที่ทำอยู่"
+        else
+            startFarmRun(depositOnlyFlow)
+        end
+    end,
+})
+
+------------------------------------------------------------
+-- 4. UPDATE LOOP & BOOTSTRAP
+------------------------------------------------------------
+task.spawn(function()
+    local lastF, lastFS, lastAS, lastAM, lastHand, lastBank, lastRepair = "", "", "", "", "", "", 0
+    while true do
+        task.wait(0.4)
+        
+        -- Deposit UI
+        local hand, bank = getMoney()
+        local handStr = ("$%s"):format(fmt(hand))
+        local bankStr = ("$%s"):format(fmt(bank))
+        if handStr ~= lastHand then lastHand = handStr setHandUI(handStr) end
+        if bankStr ~= lastBank then lastBank = bankStr setBankUI(bankStr) end
+        
+        -- Farm UI
+        if FarmUI.status ~= lastFS then lastFS = FarmUI.status setFStatusUI(lastFS) end
+        if FarmUI.step ~= lastF then lastF = FarmUI.step setFStepUI(lastF) end
+        
+        -- ATM UI
+        local s = curATMStatus
+        if progressText ~= "" and (ATMCfg.Active or ATMCfg.Manual) then s = s .. "  •  " .. progressText end
+        if ATMCfg.UndergroundMode then s = "🚇 " .. s end
+        if s ~= lastAS then lastAS = s setATMStatusUI(s) end
+        
+        local ok, pct, cur, max, vname = pcall(Veh.health)
+        if not ok then pct = nil end
+        local hp = ""
+        if pct then hp = ("   ❤️ %s %d/%d"):format(vname, cur, max) end
+        local m = ("💵 มือ $%s   🏦 ธนาคาร $%s   🎫 %s ×%d   ✅ แฮก %d ครั้ง%s"):format(
+            fmt(hand), fmt(bank), ATMCfg.Chip, countItem(ATMCfg.Chip), stats.hacks, hp)
+        if m ~= lastAM then lastAM = m setATMMoneyUI(m) end
+        
+        -- ATM Highlights & Repair
+        if ATMCfg.HighlightATM then
+            pcall(updateHighlights)
+        elseif not isSeated() then
+            pcall(function() for _, a in ipairs(Drive.collectATMs()) do atmState(a) end end)
+        end
+        if ATMCfg.AutoRepair and pct and pct <= 0 and os.clock() - lastRepair > 3 then
+            lastRepair = os.clock()
+            task.spawn(function()
+                if Veh.repair() then say("ซ่อมรถสำเร็จ") else say("ซ่อมรถไม่ผ่าน") end
+            end)
+        end
+    end
+end)
+
+task.spawn(function()
+    task.wait(1)
+    log("พร้อมแล้ว เปิดสวิตช์ 'เริ่มฟาร์ม' หรือ 'ATM' ตามต้องการ")
+end)
