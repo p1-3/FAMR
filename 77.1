@@ -1,7 +1,7 @@
 --[[==========================================================================
   AUTO FARM HUB (WindUI)
   รวม: Auto Farm v2.4 + ระบบฝากเงินที่ ATM + Utilities (เบื้องหลัง)
-  - ฝากเงิน: เมื่อเงินในมือถึงเกณฑ์ -> เดินไปที่ Interior.ATM -> ฝากทั้งหมด -> กลับไปฟาร์มต่อ
+  - ฝากเงิน: เมื่อเงินในมือถึงเกณฑ์ -> เดินไปที่ ATM -> ฝากทั้งหมด -> กลับไปฟาร์มต่อ
   - รับกล่อง: กด ProximityPrompt รัว (burst) จนกล่องเต็ม/ไม่เพิ่มแล้ว
   - Utilities: ทำงานเบื้องหลังอัตโนมัติ (ไม่โชว์บน UI)
   - UI เหลือ 2 แท็บ: ฟาร์ม + ฝากเงิน (แสดงเฉพาะเงินในมือ/ATM)
@@ -228,7 +228,6 @@ local function onRemote(self, ...)
 	local a1, a2 = ...
 	if typeof(self) == "Instance" and type(a1) == "number" and type(a2) == "string" then
 		lastNum = a1
-		UI.num = ("%d (%s)"):format(a1, a2)
 		if a2 == "player_stocked_shelf" then lastStock = os.clock() end
 	end
 end
@@ -1634,7 +1633,7 @@ end
 local function depositAtATM()
 	local atm = getATM()
 	if not atm then
-		lastResult = "❌ ไม่พบ Interior.ATM"
+		lastResult = "❌ ไม่พบ ATM"
 		log(lastResult)
 		return false
 	end
@@ -2020,7 +2019,6 @@ end
 -- ===== ฟาร์ม =====
 local setFStatus = makeLive(FarmTab, "📊 สถานะ", "พร้อม")
 local setFStep   = makeLive(FarmTab, "🧭 ขั้นตอน", "-")
-local setFNum    = makeLive(FarmTab, "🔢 เลขล่าสุดที่เกมส่ง", "—")
 FarmTab:Divider()
 
 FarmTab:Toggle({
@@ -2089,13 +2087,13 @@ FarmTab:Slider({
 
 -- ===== ฝากเงิน (แสดงแค่เงินในมือและ ATM) =====
 local setHand = makeLive(DepTab, "💵 เงินในมือ", "$0")
-local setBank = makeLive(DepTab, "🏧 เงินใน ATM (ธนาคาร)", "$0")
+local setBank = makeLive(DepTab, "🏧 ATM", "$0")
 DepTab:Divider()
 DepTab:Space()
 
 DepTab:Toggle({
 	Title = "🔄 ฝากเงินอัตโนมัติ (ที่ ATM)",
-	Desc = "ระหว่างฟาร์ม ถ้าเงินในมือถึงเกณฑ์ จะเดินไปฝากที่ Interior.ATM แล้วกลับมาฟาร์มต่อ",
+	Desc = "ระหว่างฟาร์ม ถ้าเงินในมือถึงเกณฑ์ จะเดินไปฝากที่ ATM แล้วกลับมาฟาร์มต่อ",
 	Value = false,
 	Callback = function(v)
 		Cfg.AutoOn = v
@@ -2157,7 +2155,6 @@ task.spawn(function()
 
 		push("fs", setFStatus, UI.status)
 		push("fst", setFStep, UI.step)
-		push("fn", setFNum, UI.num)
 	end
 end)
 
@@ -2188,7 +2185,7 @@ task.spawn(function()
 end)
 task.spawn(function()
 	task.wait(2)
-	log(getATM() and "🏧 พบ Interior.ATM" or "⚠️ ไม่พบ Interior.ATM")
+	log(getATM() and "🏧 พบ ATM" or "⚠️ ไม่พบ ATM")
 	log("Net counter: " .. (NetTbl and "OK" or "FAIL"))
 end)
 log("พร้อมแล้ว เปิดสวิตช์ 'เริ่มฟาร์มอัตโนมัติ' ในแท็บฟาร์ม")
